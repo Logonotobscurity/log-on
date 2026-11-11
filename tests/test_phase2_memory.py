@@ -133,3 +133,23 @@ def test_phase1_graph_unchanged_without_phase2_options(orch):
     r = orch.start("Calculate 2 * 21")
     assert nodes(orch, r["run_id"]) == ["intake", "policy", "planning", "permission", "action", "validation", "audit"]
     assert "memory" not in r and "knowledge" not in r
+
+
+def test_neo4j_backend_end_to_end_through_mcp(tmp_path, extraction, monkeypatch):
+    """Same orchestrator, Neo4j instead of Kuzu: credentials reach the MCP server only via env forwarding."""
+    import pytest
+    from conftest import AS_OF, _neo4j_available
+    if not _neo4j_available():
+        pytest.skip("Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)")
+    from log_on.graph import Orchestrator
+    from log_on.kg import Neo4jGraphStore, load_into
+    from log_on.planner import RuleBasedPlanner
+    with Neo4jGraphStore() as w:
+        load_into(w, extraction)
+    monkeypatch.setenv("LOG_ON_AS_OF", AS_OF.isoformat())
+    store, emb = make_memory_store(None)  # InMemoryStore variant
+    o = Orchestrator(planner=RuleBasedPlanner(), audit_path=tmp_path / "a.jsonl", outbox=tmp_path / "o.jsonl",
+                     memory=MemoryManager(store, emb), graph_backend="neo4j")
+    r = o.start("Which suppliers serve customers whose contracts expire in Q1?")
+    assert r["knowledge"]["backend"] == "neo4j" and r["status"] == "completed"
+    assert "4 supplier(s)" in r["final_output"] and "Onne Port Services Ltd" in r["final_output"]

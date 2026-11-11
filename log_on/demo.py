@@ -1,4 +1,6 @@
-"""python -m log_on.demo  -- walks through the Phase 1 scenarios with printed output."""
+"""python -m log_on.demo            -- Phase 1 scenarios (safe orchestrator)
+python -m log_on.demo --phase2   -- Phase 2 scenarios (PDF -> knowledge graph -> multi-hop QA + long-term memory)
+"""
 from __future__ import annotations
 
 import os
@@ -18,8 +20,18 @@ def show(title: str, res: dict) -> None:
         print(f"planner     : {res['planner']}")
         for s in res["plan"]:
             print(f"  plan step : {s['tool']}({s['args']})")
+    if res.get("memory"):
+        m = res["memory"]
+        sem = [f"{x['text']!r} ({x['score']})" for x in m.get("semantic", [])[:2]]
+        print(f"memory      : intent={(m.get('intent') or {}).get('kind')} semantic={sem} procedural={m.get('procedural')}")
+    if res.get("knowledge"):
+        k = res["knowledge"]
+        ents = [f"{e['name']} [{e['label']} {e['id']}, from {e['from']}]" for e in k.get("entities", [])]
+        print(f"knowledge   : backend={k.get('backend')} linked={ents}")
     if res.get("pending_approval"):
         print(f"PAUSED      : {res['pending_approval']['question']}")
+        for w in res["pending_approval"].get("memory_warnings", []):
+            print(f"  MEMORY WARNING: {w}")
     if res.get("approval"):
         print(f"approval    : {res['approval']}")
     for v in res.get("violations", []):
@@ -28,6 +40,8 @@ def show(title: str, res: dict) -> None:
         print("output      :")
         for line in res["final_output"].splitlines():
             print(f"    {line}")
+    for w in res.get("memory_writes", []):
+        print(f"memory write: {w}")
 
 
 def main() -> None:
@@ -72,5 +86,91 @@ def main() -> None:
     print(LINE)
 
 
+def phase2() -> None:
+    import json
+
+    from .ingest import run as ingest
+    from .memory import MemoryManager, make_memory_store
+    from .planner import RuleBasedPlanner
+
+    workdir = Path(os.getenv("LOG_ON_DEMO_DIR") or tempfile.mkdtemp(prefix="log_on_demo2_"))
+    os.environ.setdefault("LOG_ON_AS_OF", "2026-11-11")  # pin "today" so "Q1" deterministically means Q1 2027
+    pdf = Path(__file__).resolve().parent.parent / "samples" / "lagoon_freight_portfolio_fy2026.pdf"
+    backend = os.getenv("LOG_ON_GRAPH_BACKEND", "kuzu")
+    graph_path = workdir / "graph.kuzu"
+    print(LINE)
+    print("LOG_ON Phase 2 - Grounded Memory demo")
+    print(f"as-of date: {os.environ['LOG_ON_AS_OF']}   graph backend: {backend}   workdir: {workdir}")
+    print(LINE)
+
+    print(f"\n{LINE}\n1. Intake: PDF -> provenance-tagged chunks -> entities/relations -> graph")
+    summary = ingest(pdf, graph_path if backend == "kuzu" else None, backend, workdir / "chunks.json",
+                     workdir / "audit.jsonl")
+    print(f"document    : {summary['title']} ({summary['pages']} pages, doc_id={summary['doc_id']})")
+    print(f"chunks      : {summary['chunks']} ({summary['tables']} tables) -> {summary['chunks_file']}")
+    chunks = json.loads(Path(summary["chunks_file"]).read_text())["chunks"]
+    sample = next(c for c in chunks if c["section"] == "3. Contract Register")
+    print(f"sample chunk: page={sample['page']} section={sample['section']!r} kind={sample['kind']} "
+          f"columns={sample['table']['columns']}")
+    print(f"graph       : {summary['counts']}")
+    print(f"warnings    : {summary['warnings'] or 'none'}")
+
+    def make():  # a new Orchestrator instance = a new session; only memory.sqlite is shared
+        store, emb = make_memory_store(workdir / "memory.sqlite")
+        return Orchestrator(planner=RuleBasedPlanner(), audit_path=workdir / "audit.jsonl",
+                            outbox=workdir / "outbox.jsonl", memory=MemoryManager(store, emb),
+                            graph_path=graph_path if backend == "kuzu" else None,
+                            graph_backend=None if backend == "kuzu" else backend)
+    orch = make()
+    print(f"embedder    : {orch.memory.embedder_name}")
+
+    scenarios = [
+        ("2. Multi-hop question (Supplier -> Contract <- Customer, filtered by expiry quarter)",
+         "Which suppliers serve customers whose contracts expire in Q1?"),
+        ("3. Three-hop question (Person -> Customer -> Contract <- Supplier)",
+         "Which account managers have customers with contracts expiring in Q1, and which suppliers are involved?"),
+        ("4. Knowledge retrieval links entities; planner picks find_path",
+         "How is Sahel Telecom Towers connected to Onne Port Services?"),
+    ]
+    for title, goal in scenarios:
+        print(f"\n{LINE}\n{title}\ngoal: {goal!r}")
+        show("", orch.start(goal))
+
+    print(f"\n{LINE}\n5. Semantic memory write (session A), PII guard on the way in")
+    show("", orch.start("Remember that my focus customer is Eko Pharma Distribution Ltd"))
+    show("", orch.start("Remember my NIN is 12345678901 and my phone is 08000000001"))
+    show("", orch.start("Remember that my bank password is hunter2"))
+
+    print(f"\n{LINE}\n6. Cross-session recall (session B = new orchestrator, new thread id, same user)")
+    orch_b = make()
+    show("", orch_b.start("Which suppliers serve my focus customer?"))
+    print("\n  ... same question as user 'tunde' (separate namespace, nothing to recall) ...")
+    show("", orch_b.start("Which suppliers serve my focus customer?", user="tunde"))
+
+    print(f"\n{LINE}\n7. Procedural memory: an instruction changes later answers")
+    orch_b.start("From now on keep answers brief")
+    show("", make().start("What contracts expire in Q1?"))
+
+    print(f"\n{LINE}\n8. Procedural lesson from a denied approval")
+    goal = "Send the Q3 revenue report to finance@acme.example"
+    first = orch_b.start(goal)
+    show("", orch_b.resume(first["run_id"], approved=False, note="not this week"))
+    show("", make().start(goal))
+
+    print(f"\n{LINE}\n9. Episodic recall")
+    show("", make().start("What did I ask before?"))
+
+    raw = b"".join(p.read_bytes() for p in workdir.glob("memory.sqlite*"))
+    leaked = [x for x in ["12345678901", "08000000001", "hunter2", "finance@acme.example"] if x.encode() in raw]
+    print(f"\n{LINE}\nChecks")
+    print(f"  raw PII/secrets found in memory.sqlite bytes: {leaked or 'none'}")
+    rows = orch.audit.read()
+    print(f"  audit: {len(rows)} records, hash chain valid: {orch.audit.verify()}")
+    last = [r["node"] for r in rows if r["run_id"] == rows[-1]["run_id"] and r["event"] == "completed"]
+    print(f"  last run path: {' -> '.join(last)}")
+    print(LINE)
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    phase2() if "--phase2" in sys.argv else main()

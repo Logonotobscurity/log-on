@@ -1,0 +1,197 @@
+==============================================================================
+LOG_ON Phase 2 - Grounded Memory demo
+as-of date: 2026-11-11   graph backend: kuzu   workdir: <workdir>
+==============================================================================
+
+==============================================================================
+1. Intake: PDF -> provenance-tagged chunks -> entities/relations -> graph
+document    : Lagoon Freight & Logistics Ltd: Commercial Portfolio Review FY2026 (3 pages, doc_id=lagoon-freight-portfolio-fy2026-8d2d51c7)
+chunks      : 11 (5 tables) -> <workdir>/chunks.json
+sample chunk: page=2 section='3. Contract Register' kind=table columns=['Contract ID', 'Customer', 'Service', 'Value (NGN m)', 'Start', 'Expiry']
+graph       : {'Customer': 6, 'City': 6, 'Person': 6, 'Contract': 7, 'Supplier': 6, 'Organization': 1, 'LOCATED_IN': 13, 'MANAGES': 6, 'HAS_CONTRACT': 7, 'FULFILS': 10, 'CONTACT_FOR': 3, 'SERVES': 9, 'SUBSIDIARY_OF': 1, 'SUBCONTRACTS_TO': 1, 'LEADS_RENEWAL': 1}
+warnings    : none
+embedder    : fastembed:BAAI/bge-small-en-v1.5
+
+==============================================================================
+2. Multi-hop question (Supplier -> Contract <- Customer, filtered by expiry quarter)
+goal: 'Which suppliers serve customers whose contracts expire in Q1?'
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : graph_query({'question': 'Which suppliers serve customers whose contracts expire in Q1?'})
+memory      : intent=None semantic=[] procedural={}
+knowledge   : backend=kuzu linked=[]
+output      :
+    graph_query: 4 supplier(s) serve customers whose contracts expire in Q1 2027 (2027-01-01 to 2027-03-31):
+    - Atlantic Reefers Nigeria Ltd -> Eko Pharma Distribution Ltd (LF-C-2405, expires 2027-03-31); Okoya Breweries Ltd (LF-C-2407, expires 2027-03-15)
+    - Coldline Couriers Ltd -> Eko Pharma Distribution Ltd (LF-C-2405, expires 2027-03-31)
+    - Harmattan Haulage Ltd -> Zuma Cement Plc (LF-C-2401, expires 2027-01-31); Delta Agro Exports Ltd (LF-C-2403, expires 2027-02-28)
+    - Onne Port Services Ltd -> Delta Agro Exports Ltd (LF-C-2403, expires 2027-02-28)
+    Sources: p.2 3. Contract Register; p.3 5. Supplier Allocations
+    [graph template=suppliers_for_expiring_contracts, hops=3]
+memory write: {'namespace': 'episodic', 'key': 'ep-924126310272', 'text': 'Asked: Which suppliers serve customers whose contracts expire in Q1? | outcome: completed'}
+
+==============================================================================
+3. Three-hop question (Person -> Customer -> Contract <- Supplier)
+goal: 'Which account managers have customers with contracts expiring in Q1, and which suppliers are involved?'
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : graph_query({'question': 'Which account managers have customers with contracts expiring in Q1, and which suppliers are involved?'})
+memory      : intent=None semantic=[] procedural={}
+knowledge   : backend=kuzu linked=[]
+output      :
+    graph_query: 2 account manager(s) have customers with contracts expiring in Q1 2027 (2027-01-01 to 2027-03-31):
+    - Ifeoma Nwosu: contracts LF-C-2401 (Zuma Cement Plc), LF-C-2403 (Delta Agro Exports Ltd); suppliers involved: Harmattan Haulage Ltd, Onne Port Services Ltd
+    - Kunle Adebayo: contracts LF-C-2405 (Eko Pharma Distribution Ltd), LF-C-2407 (Okoya Breweries Ltd); suppliers involved: Atlantic Reefers Nigeria Ltd, Coldline Couriers Ltd
+    Sources: p.1 2. Customer Portfolio; p.2 3. Contract Register; p.3 5. Supplier Allocations
+    [graph template=managers_with_expiring_contracts, hops=3]
+memory write: {'namespace': 'episodic', 'key': 'ep-4b9176416346', 'text': 'Asked: Which account managers have customers with contracts expiring in Q1, and which suppliers are involved? | outcome: completed'}
+
+==============================================================================
+4. Knowledge retrieval links entities; planner picks find_path
+goal: 'How is Sahel Telecom Towers connected to Onne Port Services?'
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : find_path({'source': 'CUS-006', 'target': 'SUP-03', 'max_hops': 5})
+memory      : intent=None semantic=[] procedural={}
+knowledge   : backend=kuzu linked=['Sahel Telecom Towers Ltd [Customer CUS-006, from goal]', 'Onne Port Services Ltd [Supplier SUP-03, from goal]']
+output      :
+    find_path: 3-hop path: Sahel Telecom Towers Ltd <-[SERVES]- Harmattan Haulage Ltd -[FULFILS]-> LF-C-2403 <-[FULFILS]- Onne Port Services Ltd
+    Sources: p.3 5. Supplier Allocations
+memory write: {'namespace': 'episodic', 'key': 'ep-95e66449be4b', 'text': 'Asked: How is Sahel Telecom Towers connected to Onne Port Services? | outcome: completed'}
+
+==============================================================================
+5. Semantic memory write (session A), PII guard on the way in
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : memory
+memory      : intent=fact semantic=[] procedural={}
+knowledge   : backend=kuzu linked=['Eko Pharma Distribution Ltd [Customer CUS-005, from goal]']
+output      :
+    memory: Noted. I'll remember: my focus customer is Eko Pharma Distribution Ltd
+memory write: {'namespace': 'semantic', 'key': 'fact-ab26481f961c', 'text': 'my focus customer is Eko Pharma Distribution Ltd'}
+memory write: {'namespace': 'episodic', 'key': 'ep-98dad4454b51', 'text': 'Asked: Remember that my focus customer is Eko Pharma Distribution Ltd | outcome: completed'}
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : memory
+memory      : intent=fact semantic=["'my focus customer is Eko Pharma Distribution Ltd' (0.65)"] procedural={}
+knowledge   : backend=kuzu linked=[]
+output      :
+    memory: Noted. I'll remember: my NIN is <NIN> and my phone is <PHONE> (personal data removed before storing: NIN, PHONE)
+memory write: {'namespace': 'semantic', 'key': 'fact-1bb9dfa6af3c', 'text': 'my NIN is <NIN> and my phone is <PHONE>'}
+memory write: {'namespace': 'episodic', 'key': 'ep-ff61cdad4d53', 'text': 'Asked: Remember my NIN is <NIN> and my phone is <PHONE> | outcome: completed'}
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : memory
+memory      : intent=fact semantic=["'my NIN is <NIN> and my phone is <PHONE>' (0.686)", "'my focus customer is Eko Pharma Distribution Ltd' (0.667)"] procedural={}
+knowledge   : backend=kuzu linked=[]
+output      :
+    memory: I won't store that: looks like a credential/secret; secrets are never stored in memory.
+memory write: {'namespace': 'semantic', 'rejected': 'looks like a credential/secret; secrets are never stored in memory'}
+memory write: {'namespace': 'episodic', 'key': 'ep-a92c891e0c01', 'text': 'Asked: Remember that my bank password is <SECRET> | outcome: completed'}
+
+==============================================================================
+6. Cross-session recall (session B = new orchestrator, new thread id, same user)
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : graph_query({'question': 'Which suppliers serve my focus customer?', 'entity_ids': ['CUS-005']})
+memory      : intent=None semantic=["'my focus customer is Eko Pharma Distribution Ltd' (0.648)", "'my NIN is <NIN> and my phone is <PHONE>' (0.529)"] procedural={}
+knowledge   : backend=kuzu linked=['Eko Pharma Distribution Ltd [Customer CUS-005, from memory]']
+output      :
+    graph_query: Suppliers by customer:
+    - Eko Pharma Distribution Ltd: Atlantic Reefers Nigeria Ltd (LF-C-2405, Line-haul reefers); Coldline Couriers Ltd (LF-C-2405, Last-mile riders)
+    Sources: p.2 3. Contract Register; p.3 5. Supplier Allocations
+    [graph template=customer_suppliers, hops=2]
+memory write: {'namespace': 'episodic', 'key': 'ep-acde4d21cff7', 'text': 'Asked: Which suppliers serve my focus customer? | outcome: completed'}
+
+  ... same question as user 'tunde' (separate namespace, nothing to recall) ...
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : graph_query({'question': 'Which suppliers serve my focus customer?'})
+memory      : intent=None semantic=[] procedural={}
+knowledge   : backend=kuzu linked=[]
+output      :
+    graph_query: I couldn't map that question to a graph query. Try naming a customer, supplier or contract, or a quarter (e.g. 'Q1') with 'expire'.
+    [graph template=no_match, hops=0]
+memory write: {'namespace': 'episodic', 'key': 'ep-c447092e114f', 'text': 'Asked: Which suppliers serve my focus customer? | outcome: completed'}
+
+==============================================================================
+7. Procedural memory: an instruction changes later answers
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : graph_query({'question': 'What contracts expire in Q1?'})
+memory      : intent=None semantic=["'my NIN is <NIN> and my phone is <PHONE>' (0.569)", "'my focus customer is Eko Pharma Distribution Ltd' (0.563)"] procedural={'answer_style': 'brief'}
+knowledge   : backend=kuzu linked=[]
+output      :
+    graph_query: 4 contract(s) worth NGN 903.0m expire in Q1 2027 (2027-01-01 to 2027-03-31).
+    Sources: p.2 3. Contract Register
+memory write: {'namespace': 'episodic', 'key': 'ep-cdc92c44e51b', 'text': 'Asked: What contracts expire in Q1? | outcome: completed'}
+
+==============================================================================
+8. Procedural lesson from a denied approval
+
+status      : denied
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : get_report({'name': 'Q3 revenue'})
+  plan step : send_report({'recipient': 'finance@acme.example', 'subject': 'Q3 Revenue report', 'body': '{{steps[0].output}}'})
+memory      : intent=None semantic=["'my focus customer is Eko Pharma Distribution Ltd' (0.642)", "'my NIN is <NIN> and my phone is <PHONE>' (0.608)"] procedural={'answer_style': 'brief'}
+knowledge   : backend=kuzu linked=[]
+approval    : {'approved': False, 'approver': 'rhonda', 'note': 'not this week'}
+output      :
+    Action not executed: approval was denied.
+memory write: {'namespace': 'procedural', 'key': 'denied-recipient-29525e4cad5a3a12', 'text': 'An approver denied send_report to this recipient (2026-11-11). Note: not this week'}
+memory write: {'namespace': 'episodic', 'key': 'ep-aa461b5a9996', 'text': 'Asked: Send the Q3 revenue report to <EMAIL> | outcome: denied'}
+
+status      : awaiting_approval
+policy      : allowed=True rules=[]
+planner     : rule-based
+  plan step : get_report({'name': 'Q3 revenue'})
+  plan step : send_report({'recipient': 'finance@acme.example', 'subject': 'Q3 Revenue report', 'body': '{{steps[0].output}}'})
+memory      : intent=None semantic=["'my focus customer is Eko Pharma Distribution Ltd' (0.642)", "'my NIN is <NIN> and my phone is <PHONE>' (0.608)"] procedural={'denied-recipient-29525e4cad5a3a12': 'warn', 'answer_style': 'brief'}
+knowledge   : backend=kuzu linked=[]
+PAUSED      : Approve these externally visible actions?
+  MEMORY WARNING: An approver denied send_report to this recipient (2026-11-11). Note: not this week
+
+==============================================================================
+9. Episodic recall
+
+status      : completed
+policy      : allowed=True rules=[]
+planner     : memory
+memory      : intent=recall semantic=["'my focus customer is Eko Pharma Distribution Ltd' (0.6)", "'my NIN is <NIN> and my phone is <PHONE>' (0.589)"] procedural={'denied-recipient-29525e4cad5a3a12': 'warn', 'answer_style': 'brief'}
+knowledge   : backend=kuzu linked=[]
+output      :
+    memory: Facts I remember:
+      - my focus customer is Eko Pharma Distribution Ltd
+      - my NIN is <NIN> and my phone is <PHONE>
+    Recent requests:
+      - What contracts expire in Q1? -> completed
+      - Send the Q3 revenue report to <EMAIL> -> denied
+      - From now on keep answers brief -> completed
+      - Which suppliers serve my focus customer? -> completed
+      - Remember that my focus customer is Eko Pharma Distribution Ltd -> completed
+    Standing instructions:
+      - keep answers brief
+memory write: {'namespace': 'episodic', 'key': 'ep-6832c598c2a0', 'text': 'Asked: What did I ask before? | outcome: completed'}
+
+==============================================================================
+Checks
+  raw PII/secrets found in memory.sqlite bytes: none
+  audit: 118 records, hash chain valid: True
+  last run path: intake -> policy -> memory_retrieval -> knowledge_retrieval -> planning -> validation -> memory_update -> audit
+==============================================================================
