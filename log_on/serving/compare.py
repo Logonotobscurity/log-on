@@ -243,7 +243,7 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None, sam
                                     for r in results if r.get("accepted") not in (None, "route")],
             "failed_details": [{"id": r["id"], "category": r["category"], "status": r["status"], "tools": r["tools"],
                                 "notes": {k: str(v)[:200] for k, v in r["notes"].items()
-                                          if k == "error" or r["metrics"].get(k, 1) < 1}}
+                                          if k in ("error", "outcome") or r["metrics"].get(k, 1) < 1}}
                                for r in results if not r["passed"]], "elapsed_s": round(time.time() - t0, 1)}
 
 

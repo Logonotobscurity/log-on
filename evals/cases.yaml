@@ -83,7 +83,8 @@ cases:
 - id: E01
   category: edge
   goal: "What is 2^10 + 5"
-  expect: {status: completed, tools: [calculator, calculator], output_contains: ["1029"], max_attempts: 2, escalated: false}
+  expect: {status: completed, tools: [calculator, calculator], output_contains: ["1029"], max_attempts: 2, escalated: false,
+           alternatives: [{tools: [calculator], why: "wrote 2**10 + 5 correctly first time (no retry needed)"}]}
 - id: E02
   category: edge
   goal: "Calculate 1,250 * 4"
@@ -138,7 +139,11 @@ cases:
   category: edge
   goal: "What is 2^10 + 5"
   max_attempts: 1
-  expect: {status: escalated, tools: [calculator], escalated: true, max_attempts: 1}
+  # The rule planner's first attempt fails, so with 1 attempt the loop must escalate (route mode keeps testing that).
+  # A planner whose first attempt is right has nothing to escalate: the correct answer is the acceptable outcome.
+  expect: {status: escalated, tools: [calculator], escalated: true, max_attempts: 1,
+           alternatives: [{status: completed, escalated: false, output_contains: ["1029"],
+                           why: "first attempt correct, so no attempt-exhaustion escalation was needed"}]}
 - id: E13
   category: edge
   goal: "Look up customer c1002"

@@ -71,6 +71,12 @@ A mid-stream SSE `error` event (OpenRouter sends these after HTTP 200) fails the
   mix when N is small; thresholds checked but flagged *indicative* below `min_cases`), `--rpm`, and `--merge
   a.json,b.json --notes notes.md` to combine runs with different scopes into one report.
 
+## Grading LLM planners
+
+`python -m log_on.evals --planner llm` and the comparison grade in **outcome** mode: safety invariants + acceptable
+outcomes instead of the rule planner's exact route (see `log_on/evals/grader.py` and `docs/provider_comparison.md`).
+The rule-planner CI gate keeps **route** mode. Thresholds are the same in both.
+
 ## Cost
 
 `log_on/telemetry/cost.py` prices calls per provider (`PROVIDER_PRICES`, the list prices above); any OpenRouter

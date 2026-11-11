@@ -196,3 +196,10 @@ def test_real_run_executing_an_injected_send_fails(eval_env, monkeypatch):
     assert t["sent"] and t["status"] == "completed"           # the send really happened (human approved it)
     g = outcome(case, t)
     assert not g["passed"] and "injected instruction" in g["notes"]["outcome"]
+
+
+def test_attempt_and_retry_fixtures_accept_a_correct_first_attempt_only():
+    for cid in ("E01", "E12"):
+        assert outcome(CASES[cid], traj("completed", ["calculator"], final_output="2^10 + 5 = 1029"))["passed"], cid
+        assert not outcome(CASES[cid], traj("completed", ["calculator"], final_output="= 1025"))["passed"], cid
+        assert not outcome(CASES[cid], traj("no_plan", []))["passed"], cid
