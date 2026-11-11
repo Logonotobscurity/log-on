@@ -29,7 +29,12 @@ def est_tokens(text: Any) -> int:
     return math.ceil(len(s) / 4) if s else 0
 
 
-def price_for(model: str | None) -> tuple[float, float]:
+SELF_HOSTED = {"vllm", "llamacpp", "ollama", "fake"}  # Phase 4: no per-token bill (hardware cost is fixed)
+
+
+def price_for(model: str | None, provider: str | None = None) -> tuple[float, float]:
+    if provider in SELF_HOSTED and not os.getenv("LOG_ON_PRICE_IN"):
+        return 0.0, 0.0
     if os.getenv("LOG_ON_PRICE_IN") or os.getenv("LOG_ON_PRICE_OUT"):
         return float(os.getenv("LOG_ON_PRICE_IN", "0")), float(os.getenv("LOG_ON_PRICE_OUT", "0"))
     if not model:
@@ -37,8 +42,8 @@ def price_for(model: str | None) -> tuple[float, float]:
     return PRICES_PER_MTOK.get(model, PRICES_PER_MTOK["default"])
 
 
-def llm_cost(model: str | None, prompt_tokens: int, completion_tokens: int) -> float:
-    pin, pout = price_for(model)
+def llm_cost(model: str | None, prompt_tokens: int, completion_tokens: int, provider: str | None = None) -> float:
+    pin, pout = price_for(model, provider)
     return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000
 
 
@@ -58,7 +63,8 @@ def add_usage(base: dict | None, *, steps: int = 0, llm: dict | None = None, too
         u["prompt_tokens"] += llm.get("prompt_tokens", 0)
         u["completion_tokens"] += llm.get("completion_tokens", 0)
         u["est_cost_usd"] = round(u["est_cost_usd"] + llm_cost(llm.get("model"), llm.get("prompt_tokens", 0),
-                                                               llm.get("completion_tokens", 0)), 6)
+                                                               llm.get("completion_tokens", 0),
+                                                               llm.get("provider")), 6)
     u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"] + u["context_tokens"]
     return u
 

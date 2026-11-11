@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterable, Protocol
@@ -332,24 +331,21 @@ class LLMExtractor(RuleBasedExtractor):
 
     name = "llm"
 
-    def __init__(self, api_key: str, base_url: str | None = None, model: str | None = None,
-                 complete: Callable[[str, str], str] | None = None, timeout: float = 60):
+    def __init__(self, api_key: str = "local", base_url: str | None = None, model: str | None = None,
+                 complete: Callable[[str, str], str] | None = None, timeout: float = 60, provider=None):
         super().__init__()
+        from ..serving import make_provider
         self.prose_extractor = self._llm_prose
-        self.api_key = api_key
-        self.base_url = (base_url or os.getenv("LOG_ON_LLM_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.model = model or os.getenv("LOG_ON_LLM_MODEL", "gpt-4o-mini")
+        self.provider = provider or make_provider(
+            "custom", base_url=base_url or os.getenv("LOG_ON_LLM_BASE_URL", "https://api.openai.com/v1"),
+            model=model or os.getenv("LOG_ON_LLM_MODEL", "gpt-4o-mini"), api_key=api_key, timeout=timeout)
+        self.model = self.provider.model
         self._complete = complete or self._http_complete
-        self.timeout = timeout
         self.errors: list[str] = []
 
     def _http_complete(self, system: str, user: str) -> str:
-        body = json.dumps({"model": self.model, "temperature": 0, "response_format": {"type": "json_object"},
-                           "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}).encode()
-        req = urllib.request.Request(f"{self.base_url}/chat/completions", data=body, method="POST",
-                                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read())["choices"][0]["message"]["content"]
+        from ..serving import parse_json_lenient
+        return json.dumps(parse_json_lenient(self.provider.complete(system, user, max_tokens=1024).content))
 
     def _llm_prose(self, chunk: Chunk, res: Resolver) -> None:
         src = chunk.provenance()
@@ -377,8 +373,9 @@ class LLMExtractor(RuleBasedExtractor):
 
 
 def get_extractor() -> Extractor:
-    key = os.getenv("LOG_ON_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    return LLMExtractor(key) if key else RuleBasedExtractor()
+    from ..serving import get_provider
+    p = get_provider()
+    return LLMExtractor(provider=p) if p else RuleBasedExtractor()
 
 
 def load_into(store, ex: Extraction, clear: bool = True) -> dict[str, int]:

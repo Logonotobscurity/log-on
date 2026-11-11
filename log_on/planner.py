@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.request
 from typing import Protocol
 
 from .permissions import TOOL_POLICY
@@ -118,39 +117,31 @@ use entity ids from it. Never put personal data (emails, phones, ID numbers) int
 
 
 class LLMPlanner:
+    """Plans with any OpenAI-compatible model through the Phase 4 serving layer (`log_on.serving.Provider`)."""
     name = "llm"
 
-    def __init__(self, api_key: str, base_url: str | None = None, model: str | None = None,
-                 fallback: Planner | None = None, timeout: float = 30):
-        self.api_key = api_key
-        self.base_url = (base_url or os.getenv("LOG_ON_LLM_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.model = model or os.getenv("LOG_ON_LLM_MODEL", "gpt-4o-mini")
+    def __init__(self, api_key: str = "local", base_url: str | None = None, model: str | None = None,
+                 fallback: Planner | None = None, timeout: float = 30, provider=None, system_prompt: str | None = None):
+        from .serving import make_provider
+        self.provider = provider or make_provider(
+            "custom", base_url=base_url or os.getenv("LOG_ON_LLM_BASE_URL", "https://api.openai.com/v1"),
+            model=model or os.getenv("LOG_ON_LLM_MODEL", "gpt-4o-mini"), api_key=api_key, timeout=timeout)
+        self.name = f"llm:{self.provider.name}:{self.provider.model}"
+        self.model = self.provider.model
+        self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.fallback = fallback or RuleBasedPlanner()
-        self.timeout = timeout
         self.last_error: str | None = None
         self.last_usage: dict | None = None  # Phase 3 cost ledger reads (and clears) this after planning
 
     def _complete(self, goal: str, context: dict | None = None) -> str:
+        from .serving import parse_json_lenient
         user = goal
         if context:
             user += "\n\nCONTEXT:\n" + json.dumps({k: v for k, v in context.items() if k != "graph_available"},
                                                    default=str)[:4000]
-        body = json.dumps({"model": self.model, "temperature": 0,
-                           "response_format": {"type": "json_object"},
-                           "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                                        {"role": "user", "content": user}]}).encode()
-        req = urllib.request.Request(f"{self.base_url}/chat/completions", data=body, method="POST",
-                                     headers={"Authorization": f"Bearer {self.api_key}",
-                                              "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            data = json.loads(resp.read())
-        content = data["choices"][0]["message"]["content"]
-        from .telemetry.cost import est_tokens
-        u = data.get("usage") or {}
-        self.last_usage = {"model": self.model, "calls": 1,
-                           "prompt_tokens": int(u.get("prompt_tokens") or est_tokens(SYSTEM_PROMPT + user)),
-                           "completion_tokens": int(u.get("completion_tokens") or est_tokens(content))}
-        return content
+        r = self.provider.complete(self.system_prompt, user)
+        self.last_usage = r.usage
+        return json.dumps(parse_json_lenient(r.content))
 
     @staticmethod
     def parse(raw: str) -> list[PlanStep]:
@@ -175,5 +166,13 @@ class LLMPlanner:
 
 
 def get_planner() -> Planner:
-    key = os.getenv("LOG_ON_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    return LLMPlanner(key) if key else RuleBasedPlanner()
+    """LOG_ON_PLANNER=dspy uses the human-approved DSPy program (prompts/registry.json); otherwise the LLM planner
+    when a provider is configured (log_on.serving), else rules. Every LLM path falls back to rules on error."""
+    from .serving import get_provider
+    prov = get_provider()
+    if prov is None:
+        return RuleBasedPlanner()
+    if os.getenv("LOG_ON_PLANNER", "").lower() == "dspy":
+        from .learning.planner import DSPyPlanner
+        return DSPyPlanner.from_registry(provider=prov)
+    return LLMPlanner(provider=prov)

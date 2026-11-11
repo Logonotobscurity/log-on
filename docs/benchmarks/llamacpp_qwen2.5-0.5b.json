@@ -1,0 +1,85 @@
+{
+  "provider": {
+    "name": "llamacpp",
+    "base_url": "http://127.0.0.1:8081/v1",
+    "model": "qwen2.5-0.5b-instruct",
+    "api_key": "none",
+    "timeout": 300,
+    "max_tokens": 512,
+    "json_mode": true,
+    "retries": 1
+  },
+  "max_tokens": 96,
+  "host": {
+    "machine": "x86_64",
+    "python": "3.13.5",
+    "cpus": 8
+  },
+  "date": "2026-11-11 12:51 WAT",
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 8.08,
+      "req_per_s": 1.98,
+      "output_tok_per_s": 64.2,
+      "latency_p50_ms": 402.0,
+      "latency_p95_ms": 812.4,
+      "ttft_p50_ms": 47.1,
+      "ttft_p95_ms": 60.9,
+      "decode_tok_per_s_per_req": 70.2,
+      "valid_plan_rate": 0.688
+    },
+    {
+      "concurrency": 2,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 7.36,
+      "req_per_s": 2.17,
+      "output_tok_per_s": 67.4,
+      "latency_p50_ms": 679.9,
+      "latency_p95_ms": 1585.7,
+      "ttft_p50_ms": 69.6,
+      "ttft_p95_ms": 94.7,
+      "decode_tok_per_s_per_req": 40.4,
+      "valid_plan_rate": 0.75
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 3.96,
+      "req_per_s": 4.04,
+      "output_tok_per_s": 116.9,
+      "latency_p50_ms": 796.6,
+      "latency_p95_ms": 1468.1,
+      "ttft_p50_ms": 98.4,
+      "ttft_p95_ms": 142.6,
+      "decode_tok_per_s_per_req": 38.0,
+      "valid_plan_rate": 0.625
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 4.25,
+      "req_per_s": 3.77,
+      "output_tok_per_s": 119.2,
+      "latency_p50_ms": 1709.2,
+      "latency_p95_ms": 2547.6,
+      "ttft_p50_ms": 911.6,
+      "ttft_p95_ms": 1340.5,
+      "decode_tok_per_s_per_req": 36.2,
+      "valid_plan_rate": 0.625
+    }
+  ]
+}

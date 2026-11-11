@@ -1,0 +1,34 @@
+# LOG_ON GPU serving: vLLM's OpenAI-compatible server. Needs an NVIDIA GPU + nvidia-container-toolkit.
+# Not run in this repo's environment (CPU only). The CPU equivalent is scripts/serve_llamacpp.sh.
+#   HF_TOKEN=... docker compose -f deploy/vllm/docker-compose.yml up -d
+#   LOG_ON_LLM_PROVIDER=vllm LOG_ON_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct python -m log_on "Calculate (3+4)*12"
+#   python -m log_on.serving.bench --provider vllm --model Qwen/Qwen2.5-7B-Instruct --concurrency 1,4,16,32
+services:
+  vllm:
+    image: vllm/vllm-openai:latest          # pin a digest/tag in production
+    ports: ["127.0.0.1:8000:8000"]          # bind to localhost; put a gateway with auth in front for anything else
+    ipc: host                               # PyTorch shared memory for tensor-parallel workers
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}               # only needed for gated models; never commit it
+      VLLM_API_KEY: ${VLLM_API_KEY:-}       # optional: clients then send it as LOG_ON_LLM_API_KEY
+    volumes:
+      - hf-cache:/root/.cache/huggingface   # weights live in a volume, never in the repo
+    command:
+      - --model=${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --served-model-name=${VLLM_SERVED_NAME:-Qwen/Qwen2.5-7B-Instruct}
+      - --max-model-len=8192                # KV cache is sized from this; plans need < 2k tokens
+      - --gpu-memory-utilization=0.90       # share of VRAM for weights + PagedAttention KV blocks
+      - --max-num-seqs=64                   # continuous-batching cap on concurrent sequences
+      - --enable-prefix-caching             # the planner system prompt + tool doc is shared by every request
+      - --guided-decoding-backend=xgrammar  # response_format json_schema -> constrained decoding
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40                           # first start downloads + loads weights
+volumes:
+  hf-cache: {}

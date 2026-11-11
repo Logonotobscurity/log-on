@@ -1,36 +1,23 @@
-"""Minimal OpenAI-compatible JSON chat client shared by the Phase 3 verifier and reviser.
+"""Back-compat shim over the Phase 4 serving layer (`log_on.serving`).
 
-Returns (parsed_json, usage). `usage` uses the endpoint's own token counts when present, else estimates.
-Only used when LOG_ON_LLM_API_KEY (or OPENAI_API_KEY) is set; nothing here runs in the default offline mode.
+`llm_settings()` / `chat_json()` keep their Phase 3 signatures, but every call now goes through
+`log_on.serving.Provider`, so vLLM, llama.cpp, Ollama, OpenAI, xAI and the fake server are interchangeable.
+Nothing here runs in the default offline mode (no provider configured -> rule-based components).
 """
 from __future__ import annotations
 
-import json
-import os
-import urllib.request
-
-from .telemetry.cost import est_tokens
+from .serving import Provider, get_provider, make_provider
 
 
 def llm_settings() -> dict | None:
-    key = os.getenv("LOG_ON_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not key:
+    """Phase 3 shape ({api_key, base_url, model}) for the configured provider, or None."""
+    p = get_provider()
+    if p is None:
         return None
-    return {"api_key": key, "base_url": os.getenv("LOG_ON_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
-            "model": os.getenv("LOG_ON_LLM_MODEL", "gpt-4o-mini")}
+    return {"api_key": p.config.api_key, "base_url": p.config.base_url, "model": p.config.model}
 
 
-def chat_json(system: str, user: str, *, api_key: str, base_url: str, model: str, timeout: float = 30) -> tuple[dict, dict]:
-    body = json.dumps({"model": model, "temperature": 0, "response_format": {"type": "json_object"},
-                       "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}).encode()
-    req = urllib.request.Request(f"{base_url}/chat/completions", data=body, method="POST",
-                                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read())
-    content = data["choices"][0]["message"]["content"]
-    u = data.get("usage") or {}
-    usage = {"model": model, "calls": 1,
-             "prompt_tokens": int(u.get("prompt_tokens") or est_tokens(system + user)),
-             "completion_tokens": int(u.get("completion_tokens") or est_tokens(content)),
-             "estimated": not bool(u)}
-    return json.loads(content), usage
+def chat_json(system: str, user: str, *, api_key: str = "local", base_url: str, model: str, timeout: float = 30,
+              provider: Provider | None = None) -> tuple[dict, dict]:
+    prov = provider or make_provider("custom", base_url=base_url, model=model, api_key=api_key, timeout=timeout)
+    return prov.chat_json(system, user)

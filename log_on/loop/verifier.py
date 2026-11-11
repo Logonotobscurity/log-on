@@ -89,9 +89,13 @@ Personal data in the results has been redacted as <EMAIL>, <PHONE>, <NIN>, <CARD
 class LLMVerifier(RuleVerifier):
     name = "llm+rules"
 
-    def __init__(self, api_key: str, base_url: str, model: str):
+    def __init__(self, api_key: str = "local", base_url: str = "", model: str = "", provider=None,
+                 system_prompt: str | None = None):
         super().__init__()
-        self.settings = {"api_key": api_key, "base_url": base_url, "model": model}
+        self.provider = provider
+        self.settings = {"api_key": api_key, "base_url": base_url or (provider.config.base_url if provider else ""),
+                         "model": model or (provider.model if provider else "")}
+        self.system_prompt = system_prompt or LLM_SYSTEM
         self.last_error: str | None = None
 
     def verify(self, goal, plan, tool_results, validated):
@@ -102,7 +106,7 @@ class LLMVerifier(RuleVerifier):
         from ..llm import chat_json
         user = json.dumps({"goal": goal, "plan": plan, "validated_results": validated}, default=str)[:6000]
         try:
-            data, self.last_usage = chat_json(LLM_SYSTEM, user, **self.settings)
+            data, self.last_usage = chat_json(self.system_prompt, user, **self.settings, provider=self.provider)
             ok = bool(data.get("passed"))
             reasons = [str(r) for r in data.get("reasons", [])][:5]
         except Exception as exc:  # noqa: BLE001 - an unavailable model must not fail the run; rules stand
@@ -116,6 +120,6 @@ class LLMVerifier(RuleVerifier):
 
 
 def get_verifier():
-    from ..llm import llm_settings
-    s = llm_settings()
-    return LLMVerifier(**s) if s else RuleVerifier()
+    from ..serving import get_provider
+    p = get_provider()
+    return LLMVerifier(provider=p) if p else RuleVerifier()

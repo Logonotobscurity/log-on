@@ -1,0 +1,85 @@
+{
+  "provider": {
+    "name": "llamacpp",
+    "base_url": "http://127.0.0.1:8082/v1",
+    "model": "qwen2.5-1.5b-instruct",
+    "api_key": "none",
+    "timeout": 300,
+    "max_tokens": 512,
+    "json_mode": true,
+    "retries": 1
+  },
+  "max_tokens": 96,
+  "host": {
+    "machine": "x86_64",
+    "python": "3.13.5",
+    "cpus": 8
+  },
+  "date": "2026-11-11 12:52 WAT",
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 19.86,
+      "req_per_s": 0.81,
+      "output_tok_per_s": 25.1,
+      "latency_p50_ms": 848.2,
+      "latency_p95_ms": 4067.3,
+      "ttft_p50_ms": 77.5,
+      "ttft_p95_ms": 100.1,
+      "decode_tok_per_s_per_req": 29.1,
+      "valid_plan_rate": 0.875
+    },
+    {
+      "concurrency": 2,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 19.06,
+      "req_per_s": 0.84,
+      "output_tok_per_s": 26.5,
+      "latency_p50_ms": 1695.7,
+      "latency_p95_ms": 4427.4,
+      "ttft_p50_ms": 146.8,
+      "ttft_p95_ms": 771.0,
+      "decode_tok_per_s_per_req": 15.7,
+      "valid_plan_rate": 0.875
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 9.74,
+      "req_per_s": 1.64,
+      "output_tok_per_s": 44.7,
+      "latency_p50_ms": 1867.6,
+      "latency_p95_ms": 3872.9,
+      "ttft_p50_ms": 274.5,
+      "ttft_p95_ms": 1046.1,
+      "decode_tok_per_s_per_req": 15.5,
+      "valid_plan_rate": 0.938
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "error_samples": [],
+      "wall_s": 8.5,
+      "req_per_s": 1.88,
+      "output_tok_per_s": 50.7,
+      "latency_p50_ms": 3533.2,
+      "latency_p95_ms": 5457.8,
+      "ttft_p50_ms": 1829.5,
+      "ttft_p95_ms": 2713.8,
+      "decode_tok_per_s_per_req": 15.3,
+      "valid_plan_rate": 0.938
+    }
+  ]
+}
