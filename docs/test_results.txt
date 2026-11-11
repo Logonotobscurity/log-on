@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.5, pytest-9.2.0, pluggy-1.7.0
+rootdir: /workspace/log_on
+configfile: pytest.ini
+testpaths: tests
+plugins: langsmith-0.14.17, anyio-4.16.0, Faker-37.12.0
+collected 26 items
+
+tests/test_graph.py .........                                            [ 34%]
+tests/test_units.py .................                                    [100%]
+
+============================== 26 passed in 4.65s ==============================
