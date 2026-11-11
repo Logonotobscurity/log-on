@@ -2,3 +2,10 @@
 __pycache__/
 .pytest_cache/
 runs/
+*.kuzu
+*.kuzu.wal
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+*.onnx

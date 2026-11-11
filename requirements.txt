@@ -4,3 +4,11 @@ langgraph-checkpoint-sqlite==3.1.3
 mcp==2.3.0            # official MCP Python SDK v2 (FastMCP -> MCPServer rename)
 guardrails-ai==0.11.0 # optional backend; no Hub token needed (custom validators only)
 pytest==9.2.0
+# --- Phase 2: Grounded Memory ---
+pypdf==7.0.1          # plain-text fallback parser
+pdfplumber==0.11.10   # layout-aware text + table extraction
+reportlab==5.1.0      # only to (re)generate the sample PDF
+kuzu==0.11.3          # embedded Cypher graph DB (default backend)
+neo4j==6.4.1          # driver for the optional Neo4j backend
+fastembed==0.9.1      # local CPU embeddings (BAAI/bge-small-en-v1.5, downloaded to ~/.cache, not committed)
+sqlite-vec==0.1.9     # vector index for LangGraph SqliteStore
