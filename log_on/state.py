@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     goal: str
     status: str  # running | refused | no_plan | awaiting_approval | denied | completed | blocked | error
     #             Phase 3: unverified (loop deciding) | escalated (human aborted) | budget_exceeded
+    #             step 3: quota_exceeded (per-user daily budget)
     policy: dict[str, Any]
     planner: str
     plan: list[PlanStep]
@@ -40,3 +41,5 @@ class AgentState(TypedDict, total=False):
     revision: dict[str, Any]        # latest reviser notes
     escalation: dict[str, Any]      # the human's decision after escalation
     budget: dict[str, Any]          # limits and, if stopped, which were exceeded
+    # Post-Phase-4 step 3
+    quota: dict[str, Any]           # per-user daily budget decision (log_on.quotas), set when a stop happens

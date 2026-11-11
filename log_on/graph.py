@@ -70,7 +70,8 @@ class Orchestrator:
                  audit_path: str | os.PathLike = "runs/audit.jsonl", outbox: str | os.PathLike = "runs/outbox.jsonl",
                  checkpointer=None, tool_caller: Callable[..., dict[str, Any]] = call_tools,
                  memory=None, graph_path: str | os.PathLike | None = None, graph_backend: str | None = None,
-                 loop=None, tracer: RunTracer | bool | None = None, trace_path: str | os.PathLike | None = None):
+                 loop=None, tracer: RunTracer | bool | None = None, trace_path: str | os.PathLike | None = None,
+                 quota=None):
         """`loop`: Phase 3 LoopConfig (or True for defaults from env). `tracer`: a RunTracer, False to disable,
         or None for the default (JSONL next to the audit log, plus exporters from LOG_ON_TRACE_EXPORTERS)."""
         from .loop import LoopConfig, get_reviser, get_verifier
@@ -80,10 +81,16 @@ class Orchestrator:
         self.knowledge_enabled = bool(graph_path or graph_backend)
         self.planner = planner or get_planner()
         self.guard = guard or make_guard()
-        self.audit = AuditLog(audit_path, redact=redact_text)
+        from .provenance import stamp
+        self.audit = AuditLog(audit_path, redact=redact_text, provenance=lambda: stamp(self.planner))  # O-3
         self.outbox = str(Path(outbox).resolve())
         self.tool_caller = tool_caller
         self.checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+        # Post-Phase-4 step 3: per-user/day budgets (UserQuota, False to disable, None = from env; off if no limits set)
+        if quota is None:
+            from .quotas import UserQuota
+            quota = UserQuota.from_env(Path(audit_path).parent)
+        self.quota = quota or None
         # Phase 3
         self.loop = LoopConfig.from_env() if loop is True else (loop or None)
         if self.loop is not None:
@@ -114,6 +121,8 @@ class Orchestrator:
                     raise
                 delta["usage"] = self._usage(name, state, delta)
                 self._trace_node(span, name, delta)
+                if self.quota is not None and name != "intake":  # persist this run's usage for the daily budget
+                    self.quota.record(state.get("user", "anonymous"), run_id, delta["usage"])
             self.audit.record(run_id, name, "completed", delta)
             return delta
         return wrapper
@@ -168,7 +177,30 @@ class Orchestrator:
         if self.loop is not None:
             out.update(attempt=1, attempt_limit=self.loop.max_attempts, attempts=[], tried_plans=[],
                        budget=self.budget.as_dict())
+        if self.quota is not None:  # step 3: a new run needs runs/tokens/cost left today
+            d = self.quota.start_run(out["user"], out["run_id"])
+            if not d["allowed"]:
+                out.update(status="quota_exceeded", quota=d)
         return out
+
+    def quota_stop(self, state: AgentState) -> dict:
+        d = state.get("quota") or self.quota.check(state.get("user", "anonymous"), state.get("run_id", "?"),
+                                                  state.get("usage"))
+        return {"status": "quota_exceeded", "quota": d, "final_output": self.quota.message(d)}
+
+    def _quota_gate(self, state: AgentState, nxt: str) -> bool:
+        """True if the per-user daily budget blocks `nxt` (an LLM-backed step)."""
+        if self.quota is None or nxt not in self._llm_steps():
+            return False
+        return not self.quota.check(state.get("user", "anonymous"), state.get("run_id", "?"),
+                                    state.get("usage"))["allowed"]
+
+    def _llm_steps(self) -> set[str]:
+        steps = {"planning", "replan"}
+        v = getattr(self, "verifier", None)
+        if v is not None and (getattr(v, "provider", None) is not None or str(getattr(v, "name", "")).startswith("llm")):
+            steps.add("verification")
+        return steps
 
     def policy_check(self, state: AgentState) -> dict:
         decision = policy.check_input(state["goal"])
@@ -511,6 +543,7 @@ class Orchestrator:
         """Every edge is a traced decision; with the loop on, edges into costly nodes are budget-checked."""
         fixed = router if isinstance(router, str) else None
         guarded = self.loop is not None and any(d in COSTLY for d in dests)
+        quota_gated = self.quota is not None and any(d in self._llm_steps() for d in dests)
 
         def route(state: AgentState) -> str:
             nxt = fixed or router(state)
@@ -518,10 +551,13 @@ class Orchestrator:
                 pending = len(state.get("plan") or []) if nxt in ("approval", "action") else 0
                 if self.budget.exceeded(state.get("usage"), pending):
                     nxt = "budget_stop"
+            if quota_gated and self._quota_gate(state, nxt):
+                nxt = "quota_stop"
             self.tracer.decision("route", **{"from": src, "to": nxt, "status": state.get("status")})
             return nxt
         route.__name__ = f"route_{src}"
-        g.add_conditional_edges(src, route, list(dict.fromkeys(dests + (["budget_stop"] if guarded else []))))
+        g.add_conditional_edges(src, route, list(dict.fromkeys(dests + (["budget_stop"] if guarded else [])
+                                                               + (["quota_stop"] if quota_gated else []))))
 
     def _build(self):
         g = StateGraph(AgentState)
@@ -536,11 +572,18 @@ class Orchestrator:
         if loop:
             nodes += [("verification", self.verification), ("replan", self.replan), ("escalation", self.escalation),
                       ("budget_stop", self.budget_stop)]
+        if self.quota is not None:
+            nodes += [("quota_stop", self.quota_stop)]
         for name, fn in nodes:
             g.add_node(name, self._audited(name, fn))
         done = "memory_update" if mem else "audit"
         g.add_edge(START, "intake")
-        self._link(g, "intake", "policy", ["policy"])
+        if self.quota is not None:
+            self._link(g, "intake", lambda st: "quota_stop" if st.get("status") == "quota_exceeded" else "policy",
+                       ["policy", "quota_stop"])
+            g.add_edge("quota_stop", "audit")
+        else:
+            self._link(g, "intake", "policy", ["policy"])
         grounding = (["memory_retrieval"] if mem else []) + (["knowledge_retrieval"] if kg else [])
         self._link(g, "policy", self._after_policy, [grounding[0] if grounding else "planning", "audit"])
         for a, b in zip(grounding, grounding[1:] + ["planning"]):

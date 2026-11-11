@@ -14,6 +14,7 @@ from .audit import AuditLog
 from .docai import ingest_pdf
 from .guards import redact_text
 from .kg import get_extractor, load_into, make_graph_store
+from .provenance import stamp
 
 
 def run(pdf: str | Path, graph_path: str | Path | None = None, backend: str | None = None,
@@ -29,7 +30,7 @@ def run(pdf: str | Path, graph_path: str | Path | None = None, backend: str | No
                "tables": len(doc.tables()), "backend": backend_name, "counts": counts, "warnings": ex.warnings,
                "chunks_file": str(chunks_out) if chunks_out else None}
     if audit_path:
-        AuditLog(audit_path, redact=redact_text).record(doc.doc_id, "ingest", "completed", summary)
+        AuditLog(audit_path, redact=redact_text, provenance=stamp).record(doc.doc_id, "ingest", "completed", summary)
     return summary
 
 
