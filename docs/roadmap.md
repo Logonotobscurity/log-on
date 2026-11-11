@@ -62,7 +62,7 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 - **S-2** RBAC: `user` → roles → allowed tools and data scopes in `permissions.py`. `lookup_customer` needs the `support` role. Write tests for each role.
 - **S-3** Retention: audit rotation plus a `purge --before` that keeps the hash-chain checkpoints.
 - ~~**A-1**~~ **Done (post-Phase-4 step 1)** with Starlette server-rendered HTML + JSON API (`log_on/approval_ui.py`, `log_on/approvals.py`); Slack approval is still open. Original ticket: Approval UI: a small FastAPI page or Slack interactive message that lists pending interrupts (`graph.get_state`), shows the plan diff, approves or denies via `Command(resume)`, and auto-denies after expiry.
-- **V-1** Replace regex PII with Presidio. Add a zero-shot toxicity or topic classifier, keeping the regex as a fallback.
+- ~~**V-1**~~ **Done (post-Phase-4 step 2)** for PII and prompt injection: Presidio with Nigerian NIN/BVN/phone recognizers (`log_on/guards/presidio_pii.py`) and an ONNX DeBERTa prompt-injection classifier (`log_on/guards/injection_ml.py`), regex kept as the first layer and fallback; results in `docs/safety_ml_report.md`. A toxicity/topic classifier is still open. Original ticket: Replace regex PII with Presidio. Add a zero-shot toxicity or topic classifier, keeping the regex as a fallback.
 
 ### Phase 3: Execution, real tools and evaluation
 - **X-1** Split `action` (dry-run, which returns a proposed side effect) from `execution` (commit), with validation and approval in between, matching the plan's full order.
@@ -98,7 +98,7 @@ Phase 4 is built, but three results say where the real work is:
    (ticket D-3 can then be decided on data).
 2. **Promotion with real data (L-1, L-2).** Capture approver notes and deny reasons as training data, add safe-refusal
    examples, try `--optimizer mipro`. Promote only when the full-suite gate passes, with a named approver.
-3. **Beyond regex safety (V-1).** The policy and redactor are still pattern-based; add Presidio / an ML injection
+3. ~~**Beyond regex safety (V-1).**~~ (done: step 2 below) The policy and redactor are still pattern-based; add Presidio / an ML injection
    classifier behind the same interfaces and re-run the red team. Grow the attack seeds beyond 14.
 4. **Operational gaps.** ~~An approval UI instead of the CLI~~ (done: step 1 below), container + deploy (D-2) with a Postgres
    checkpointer, stamping prompt/policy versions into every audit record (O-3), per-user/day budgets.
@@ -110,5 +110,5 @@ Phase 4 is built, but three results say where the real work is:
 | Step | Scope | Status |
 |---|---|---|
 | 1 Approval web UI (A-1, feeds L-1) | Local web app listing LangGraph approval interrupts with a redacted preview (steps, risk tiers, destinations, policy/permission reasons, memory warnings); named approvers via `LOG_ON_APPROVER_TOKENS`; approve / reject with a note (reason required to reject); expiry (`LOG_ON_APPROVAL_TTL_S`, default 24 h, then auto-deny); stale-form check; every decision in the run's hash-chained audit log and in the hash-chained feedback log `runs/feedback.jsonl` (learning data for L-1). CLI shares the same service (`--pending`, `--by`, `--note`) | **Done** (10 tests) |
-| 2 Smarter safety checks (V-1) | Presidio + ML injection classifier behind the existing interfaces, more red-team seeds, re-run red team | Next |
-| 3 Production hardening (D-2, O-3, budgets) | Dockerfile/compose, Postgres checkpointer option, prompt/policy version in every audit record, per-user/day budgets | Planned |
+| 2 Smarter safety checks (V-1) | Presidio (Nigerian NIN/BVN/phone, cards, IBAN/IP/crypto) and an ONNX prompt-injection classifier behind the existing policy/redactor/memory interfaces, regex layer first and as fallback (`LOG_ON_PII_BACKEND`, `LOG_ON_INJECTION_ML`); quarantine of injected sentences in tool output / retrieved documents; red team grown 186 → 532 attacks (Nigerian languages, encodings, hidden comments, multi-turn, poisoned documents), found 3 vulnerable + 125 contained bypasses, fixed to 0 with the rule and live Qwen2.5-1.5B planners; 532 regression cases in the eval gate; `python -m log_on.evals.safety_bench` (PII recall 85% → 100%, held-out injections 1/20 → 13/20, +23 ms p50) | **Done** (42 new tests; suite 166 → 215) |
+| 3 Production hardening (D-2, O-3, budgets) | Dockerfile/compose, Postgres checkpointer option, prompt/policy version in every audit record, per-user/day budgets | Next |
