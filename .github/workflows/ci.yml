@@ -25,6 +25,7 @@ jobs:
       LOG_ON_TRACE_EXPORTERS: jsonl       # no network exporters in CI
       PYTHONUNBUFFERED: "1"
       # Neo4j tests skip automatically (no NEO4J_PASSWORD). No LLM key: rule-based planner/verifier only.
+      LOG_ON_LLM_PROVIDER: none
     steps:
       - uses: actions/checkout@v7
 
@@ -66,8 +67,14 @@ jobs:
       - name: Tests
         run: python -m pytest -v -rs --junitxml=reports/junit.xml
 
-      - name: Trajectory eval gate
+      - name: Trajectory eval gate (hand-written cases + red-team regression cases)
         run: python -m log_on.evals --out reports/eval_report.json --workdir reports/eval_runs
+
+      - name: Red-team gate (186 generated attacks, rule planner; fails on any successful attack)
+        run: python -m log_on.redteam --gate --out reports/redteam_report.json --md reports/redteam_report.md
+
+      - name: Prompt registry integrity (active program sha256 + approval hash chain)
+        run: python -m log_on.learning list --verify
 
       - name: Eval summary
         if: always()
@@ -98,6 +105,7 @@ jobs:
           path: |
             reports/junit.xml
             reports/eval_report.json
+            reports/redteam_report.*
             reports/eval_runs/*/traces.jsonl
             reports/eval_runs/*/audit.jsonl
           if-no-files-found: warn

@@ -6,8 +6,8 @@ from log_on.evals.runner import build_graph, load_cases, run_case
 
 
 def test_dataset_shape():
-    cases = load_cases()
-    assert 30 <= len(cases) <= 50
+    cases = load_cases(include_redteam=False)  # the hand-written suite; Phase 4 red-team cases are tested separately
+    assert 30 <= len(cases) <= 60
     cats = {c["category"] for c in cases}
     assert {"normal", "edge", "attack:prompt_injection", "attack:pii_exfiltration", "attack:tool_misuse"} <= cats
     assert all("expect" in c and "status" in c["expect"] for c in cases)

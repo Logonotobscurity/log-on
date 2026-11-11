@@ -268,10 +268,25 @@ class Orchestrator:
         return out
 
     def permission(self, state: AgentState) -> dict:
-        decision = permissions.evaluate(state["plan"])
+        decision = permissions.evaluate(state["plan"], goal=state.get("goal", ""))
         out: dict[str, Any] = {"permission": decision}
-        if not decision["allowed"]:
+        if decision["denied_tools"]:
             out.update(status="refused", final_output=f"Tools not permitted: {decision['denied_tools']}")
+        elif decision.get("invalid_refs"):
+            v = decision["invalid_refs"][0]
+            out.update(status="refused", final_output=(
+                f"Refused: step {v['step']} ({v['tool']}) uses the output of step(s) {v['refs']}, which have not run "
+                "yet. The plan is malformed, so nothing was run and no approval was requested."))
+        elif decision["provenance_violations"]:
+            where = ", ".join(redact_text(v["destination"]) for v in decision["provenance_violations"])
+            out.update(status="refused", final_output=(
+                f"Refused: the plan would send data to {where}, which you did not give in this request. "
+                "I only send to addresses you type yourself."))
+        elif decision["dataflow_violations"]:
+            v = decision["dataflow_violations"][0]
+            out.update(status="refused", final_output=(
+                f"Refused: the plan would email personal data from {v['sources']} to an outside domain "
+                f"({v['domain']}). Customer records may only be sent to trusted domains (LOG_ON_TRUSTED_DOMAINS)."))
         elif decision["needs_approval"]:
             out["status"] = "awaiting_approval"
         return out

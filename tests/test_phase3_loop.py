@@ -131,7 +131,7 @@ def test_fail_fast_never_sends_an_error_message(tmp_path):
                     {"tool": "send_report", "args": {"recipient": "a@acme.example", "subject": "s",
                                                      "body": "{{steps[0].output}}"}}]
     o = Orchestrator(planner=Bad(), audit_path=tmp_path / "a.jsonl", outbox=tmp_path / "o.jsonl")  # Phase 1 too
-    r = o.resume(o.start("send it")["run_id"], approved=True)
+    r = o.resume(o.start("send it to a@acme.example")["run_id"], approved=True)
     assert r["tool_results"][1]["skipped"] and not (tmp_path / "o.jsonl").exists()
 
 

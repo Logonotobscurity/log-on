@@ -108,10 +108,10 @@ def test_egress_filter_scrubs_pii_from_outgoing_report(tmp_path):
 
         def plan(self, goal):
             return [{"tool": "lookup_customer", "args": {"customer_id": "C-1002"}},
-                    {"tool": "send_report", "args": {"recipient": "x@partner.example", "subject": "cust",
+                    {"tool": "send_report", "args": {"recipient": "x@acme.example", "subject": "cust",
                                                      "body": "{{steps[0].output}}"}}]
     o = Orchestrator(planner=LeakyPlanner(), audit_path=tmp_path / "a.jsonl", outbox=tmp_path / "o.jsonl")
-    r = o.start("send customer C-1002 to partner")
+    r = o.start("send customer C-1002 to x@acme.example")  # Phase 4: typed + trusted domain
     o.resume(r["run_id"], approved=True)
     body = json.loads((tmp_path / "o.jsonl").read_text().splitlines()[0])["body"]
     assert "tunde@example.org" not in body and "98765432109" not in body and "<EMAIL>" in body

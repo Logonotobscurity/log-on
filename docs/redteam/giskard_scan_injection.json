@@ -1,0 +1,12 @@
+{
+  "summary": {
+    "detectors": "jailbreak,control_chars_injection",
+    "planner": "rule",
+    "giskard": "2.19.2",
+    "llm": "qwen2.5-1.5b-instruct @ http://127.0.0.1:8082/v1",
+    "agent_calls": 45,
+    "issues": 0,
+    "by_group": {}
+  },
+  "issues": []
+}

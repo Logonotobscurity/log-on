@@ -32,7 +32,7 @@ from .embeddings import DIMS, get_embedder
 
 # Stricter than the output guard: natural-language credential statements are never memorised.
 MEMORY_SECRET_RE = re.compile(r"(?i)\b(password|passcode|passphrase|pin|otp|api[ _-]?key|secret|token|cvv)\b"
-                              r"\s*(is|was|=|:)")
+                              r"(?:\s+(?:for|of|on|to)\b[^.\n]{0,40}?)?\s*(\bis\b|\bwas\b|=|:)")
 PII_TAG_RE = re.compile(r"<(EMAIL|PHONE|NIN|CARD|SECRET)>")
 
 

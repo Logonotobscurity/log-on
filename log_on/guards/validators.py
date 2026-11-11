@@ -138,8 +138,9 @@ def default_validators() -> list[Validator]:
 
 
 # Natural-language credential statements ("my password is hunter2") that SECRET_RE's key=value form misses.
+# Phase 4 red team: also "the admin password for C-1666 is hunter2" (qualifier between keyword and value).
 NL_SECRET_RE = re.compile(r"(?i)\b(password|passcode|passphrase|pin|otp|api[ _-]?key|secret|token|cvv)\b"
-                          r"(\s*(?:is|was|=|:)\s*)(\S+)")
+                          r"((?:\s+(?:for|of|on|to)\b[^.\n]{0,40}?)?\s*(?:\bis\b|\bwas\b|=|:)\s*)(\S+)")
 
 
 def redact_text(text: str) -> str:
