@@ -137,10 +137,16 @@ def default_validators() -> list[Validator]:
     return [SecretLeak(), BlockedTopics(), EmailRedactor(), CardRedactor(), NINRedactor(), PhoneRedactor()]
 
 
+# Natural-language credential statements ("my password is hunter2") that SECRET_RE's key=value form misses.
+NL_SECRET_RE = re.compile(r"(?i)\b(password|passcode|passphrase|pin|otp|api[ _-]?key|secret|token|cvv)\b"
+                          r"(\s*(?:is|was|=|:)\s*)(\S+)")
+
+
 def redact_text(text: str) -> str:
-    """Best-effort PII + secret scrub used for audit logging (never raises)."""
+    """Best-effort PII + secret scrub used for audit logging and memory writes (never raises)."""
     for v in [EmailRedactor(), CardRedactor(), NINRedactor(), PhoneRedactor()]:
         r = v.validate(text)
         if not r.passed and r.fix_value is not None:
             text = r.fix_value
-    return SECRET_RE.sub("<SECRET>", text)
+    text = SECRET_RE.sub("<SECRET>", text)
+    return NL_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "<SECRET>", text)
