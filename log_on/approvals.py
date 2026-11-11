@@ -134,7 +134,9 @@ class ApprovalService:
         self.orch = orch
         self.ttl_s = ttl_s or ttl_seconds()
         path = feedback_path or Path(orch.audit.path).parent / "feedback.jsonl"
-        self.feedback = AuditLog(path, redact=redact_text)
+        from .provenance import stamp
+        # O-3: decisions carry the same provenance stamp as the run records they resolve
+        self.feedback = AuditLog(path, redact=redact_text, provenance=lambda: stamp(getattr(orch, "planner", None)))
         self._lock = threading.Lock()
 
     # --- reading -------------------------------------------------------------------------------------

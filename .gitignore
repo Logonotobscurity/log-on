@@ -20,3 +20,4 @@ reports/
 models/
 *.db
 !.env.example
+runs_*/

@@ -33,6 +33,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from .approvals import ApprovalError, ApprovalService
+from .dashboard.views import routes as dashboard_routes, safe_next
 
 COOKIE = "log_on_approver"
 MIN_TOKEN_LEN = 16
@@ -85,11 +86,11 @@ cursor:pointer;margin-right:8px} .approve{background:#1e6b34;color:#fff}.reject{
 
 
 def page(title: str, body: str, who: str | None = None, flash: str = "", error: bool = False) -> HTMLResponse:
-    nav = (f'<span>Signed in as <b>{E(who)}</b><a href="/">Pending</a><a href="/history">History</a>'
+    nav = (f'<span>Signed in as <b>{E(who)}</b><a href="/ui">Dashboard</a><a href="/">Pending</a><a href="/history">History</a>'
            f'<a href="/logout">Sign out</a></span>') if who else ""
     fl = f'<div class="flash{" err" if error else ""}">{E(flash)}</div>' if flash else ""
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>{E(title)} · LOG_ON approvals</title>'
-           f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head>'
+           f'<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><style>{CSS}</style></head>'
            f'<body><header><b>LOG_ON · approvals</b>{nav}</header><main>{fl}{body}</main></body></html>')
     return HTMLResponse(doc)
 
@@ -126,12 +127,12 @@ def create_app(service: ApprovalService, tokens: dict[str, str] | None = None, s
             tok = str(form.get("token", "")).strip()
             name = next((n for t, n in tokens.items() if tok and hmac.compare_digest(tok.encode(), t.encode())), None)
             if not name:
-                return page("Sign in", _login_form(), flash="Unknown approver token.", error=True)
-            resp = RedirectResponse("/", status_code=303)
+                return page("Sign in", _login_form(form.get("next")), flash="Unknown approver token.", error=True)
+            resp = RedirectResponse(safe_next(str(form.get("next", ""))) or "/", status_code=303)
             resp.set_cookie(COOKIE, tok, httponly=True, samesite="strict", secure=request.url.scheme == "https",
                             max_age=12 * 3600)
             return resp
-        return page("Sign in", _login_form())
+        return page("Sign in", _login_form(request.query_params.get("next")))
 
     async def logout(request: Request) -> Response:
         resp = RedirectResponse("/login", status_code=303)
@@ -177,16 +178,17 @@ def create_app(service: ApprovalService, tokens: dict[str, str] | None = None, s
             return page("Forbidden", '<div class="card">Invalid form token. Reload the page.</div>', who=name,
                         error=True, flash="CSRF check failed")
         approve = form.get("decision") == "approve"
+        back = safe_next(str(form.get("next", "")))  # the dashboard queue posts here too
         try:
             # the graph's MCP client uses asyncio.run(), so it must not run on the server's event loop
             res = await run_in_threadpool(service.decide, run_id, approve, name, str(form.get("note", "")),
                                           interrupt_id=str(form.get("interrupt_id", "")) or None, source="web")
         except ApprovalError as e:
-            if e.code in (404, 410):
-                return RedirectResponse(f"/?msg={_q(str(e))}", status_code=303)
+            if e.code in (404, 410) or back:
+                return RedirectResponse(f"{back or '/'}?msg={_q(str(e))}", status_code=303)
             return RedirectResponse(f"/approvals/{run_id}?err={_q(str(e))}", status_code=303)
         msg = f"Run {run_id}: {'approved' if approve else 'rejected'} by {name}; status now {res.get('status')}."
-        return RedirectResponse(f"/?msg={_q(msg)}", status_code=303)
+        return RedirectResponse(f"{back or '/'}?msg={_q(msg)}", status_code=303)
 
     def history(request: Request) -> Response:
         name, _ = who(request)
@@ -247,7 +249,8 @@ def create_app(service: ApprovalService, tokens: dict[str, str] | None = None, s
         Route("/", index), Route("/login", login, methods=["GET", "POST"]), Route("/logout", logout),
         Route("/approvals/{run_id}", detail), Route("/approvals/{run_id}/decide", decide, methods=["POST"]),
         Route("/history", history), Route("/api/approvals", api_list),
-        Route("/api/approvals/{run_id}/decide", api_decide, methods=["POST"]), Route("/healthz", healthz), Route("/readyz", readyz)])
+        Route("/api/approvals/{run_id}/decide", api_decide, methods=["POST"]), Route("/healthz", healthz), Route("/readyz", readyz),
+        *dashboard_routes(service, who, csrf_for)])
 
     return SecurityHeaders(app)
 
@@ -283,7 +286,10 @@ def _readiness(service) -> Response:
 
 
 SECURITY_HEADERS = [
-    (b"content-security-policy", b"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"),
+    # self-hosted CSS/JS/fonts only; no inline script, no third-party origins, no framing
+    (b"content-security-policy", b"default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+     b"font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; "
+     b"frame-ancestors 'none'"),
     (b"x-frame-options", b"DENY"), (b"referrer-policy", b"no-referrer"), (b"cache-control", b"no-store"),
     (b"x-content-type-options", b"nosniff")]
 
@@ -312,8 +318,10 @@ def _q(s: str) -> str:
     return quote(s[:300])
 
 
-def _login_form() -> str:
+def _login_form(nxt=None) -> str:
+    nxt = safe_next(str(nxt or ""))
     return ('<div class="card"><h2>Sign in</h2><form method="post" action="/login">'
+            + (f'<input type="hidden" name="next" value="{E(nxt)}">' if nxt else "") +
             '<p>Approver token (from <code>LOG_ON_APPROVER_TOKENS</code>)</p>'
             '<input type="password" name="token" autocomplete="off" style="width:100%;padding:6px" required>'
             '<p><button class="approve" type="submit">Sign in</button></p></form></div>')
