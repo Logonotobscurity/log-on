@@ -12,3 +12,7 @@ kuzu==0.11.3          # embedded Cypher graph DB (default backend)
 neo4j==6.4.1          # driver for the optional Neo4j backend
 fastembed==0.9.1      # local CPU embeddings (BAAI/bge-small-en-v1.5, downloaded to ~/.cache, not committed)
 sqlite-vec==0.1.9     # vector index for LangGraph SqliteStore
+# --- Phase 3: Autonomous Loop & Telemetry ---
+opentelemetry-sdk==1.45.2                     # private TracerProvider, JSONL/console exporters
+opentelemetry-exporter-otlp-proto-http==1.45.2  # optional OTLP / self-hosted Langfuse export
+pyyaml==6.0.3                                 # eval dataset (evals/cases.yaml)
