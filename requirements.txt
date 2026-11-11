@@ -22,3 +22,8 @@ pyyaml==6.0.3                                 # eval dataset (evals/cases.yaml)
 dspy==3.5.0           # planner/verifier signatures, BootstrapFewShot; pulls litellm + openai
 # Red teaming: the custom harness (python -m log_on.redteam) needs nothing extra.
 # The optional Giskard 2.x LLM scan needs Python <= 3.12: see requirements-redteam.txt.
+# --- Post-Phase-4: approval web UI (python -m log_on.approval_ui) ---
+starlette==1.10.0       # server-rendered HTML + JSON API (already pulled in by mcp; pinned explicitly)
+uvicorn==0.54.0         # ASGI server
+python-multipart==0.0.33  # HTML form parsing
+httpx==0.28.1           # starlette TestClient (tests)
