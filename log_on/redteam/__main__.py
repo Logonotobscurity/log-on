@@ -23,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--md")
     ap.add_argument("--export-cases")
     a = ap.parse_args(argv)
+    if a.export_cases:  # freeze regression cases from the regex-only layer: the gate must not depend on ML extras
+        import os
+        os.environ.update({"LOG_ON_PII_BACKEND": "regex", "LOG_ON_INJECTION_ML": "off"})
+        print("export: running in regex-only mode (LOG_ON_PII_BACKEND=regex, LOG_ON_INJECTION_ML=off)", flush=True)
     attacks = generate()
     if a.only_category:
         attacks = [x for x in attacks if x["category"].startswith(a.only_category)]
