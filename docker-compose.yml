@@ -1,0 +1,92 @@
+# LOG_ON stack (post-Phase-4 step 3). Secrets come from .env (copy .env.example; never commit .env).
+#   cp .env.example .env && $EDITOR .env
+#   GIT_SHA=$(git rev-parse HEAD) docker compose build
+#   docker compose up -d postgres approval-ui                          # approval UI on http://127.0.0.1:8765
+#   docker compose run --rm app "Send the Q3 revenue report to finance@acme.example"   # one-shot agent run
+#   docker compose --profile llm up -d llamacpp                        # optional local model (weights mounted read-only)
+name: log-on
+
+x-app: &app
+  build:
+    context: .
+    args:
+      WITH_ML: ${WITH_ML:-0}
+      GIT_SHA: ${GIT_SHA:-unknown}
+  image: log-on:${LOG_ON_IMAGE_TAG:-latest}
+  env_file:
+    - path: .env
+      required: false   # docker compose still reads ${VARS} from .env for interpolation
+  environment:
+    LOG_ON_CHECKPOINTER: postgres
+    LOG_ON_POSTGRES_DSN: postgresql://${POSTGRES_USER:-logon}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-logon}
+    LOG_ON_TRACE_EXPORTERS: ${LOG_ON_TRACE_EXPORTERS:-jsonl}
+    LOG_ON_LLM_PROVIDER: ${LOG_ON_LLM_PROVIDER:-none}
+    LOG_ON_LLM_BASE_URL: ${LOG_ON_LLM_BASE_URL:-http://llamacpp:8080/v1}
+  volumes:
+    - runs:/app/runs
+    - cache:/home/app/.cache
+  depends_on:
+    postgres:
+      condition: service_healthy
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-logon}
+      POSTGRES_DB: ${POSTGRES_DB:-logon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    # no published port: only the app containers reach it on the compose network
+
+  approval-ui:
+    <<: *app
+    command: ["python", "-m", "log_on.approval_ui"]
+    ports:
+      - "127.0.0.1:${LOG_ON_UI_PORT:-8765}:8765"   # localhost only; put HTTPS in front before exposing it
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/readyz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    restart: unless-stopped
+
+  app:
+    <<: *app
+    entrypoint: ["python", "-m", "log_on"]
+    command: ["--help"]
+    healthcheck:
+      disable: true
+    profiles: ["cli"]   # one-shot: docker compose run --rm app "<goal>"
+
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["llm"]
+    command: ["-m", "/models/${LOG_ON_GGUF:-qwen2.5-1.5b-instruct-q4_k_m.gguf}", "--host", "0.0.0.0", "--port", "8080",
+              "-c", "16384", "-np", "4", "--alias", "${LOG_ON_LLM_MODEL:-qwen2.5-1.5b-instruct}"]
+    volumes:
+      - ${LOG_ON_MODELS_DIR:-~/.cache/log_on_models}:/models:ro   # weights stay on the host, never in an image
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  runs:
+  cache:
+  pgdata:

@@ -1,4 +1,4 @@
-"""CLI with a durable SQLite checkpointer so a paused run can be approved from a *separate* process.
+"""CLI with a durable (SQLite or Postgres) checkpointer so a paused run can be approved from a *separate* process.
 
   python -m log_on "Send the Q3 revenue report to finance@acme.example"      # pauses, prints run id
   python -m log_on --resume <run_id> --approve --by ada --note "checked"      # or --deny --note "reason"
@@ -18,10 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 from pathlib import Path
-
-from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .demo import show
 from .graph import Orchestrator
@@ -29,10 +26,11 @@ from .graph import Orchestrator
 
 def build_orchestrator(runs_dir: str | Path = "runs", phase1: bool = False, no_loop: bool = False,
                        max_attempts: int | None = None) -> Orchestrator:
-    """The CLI's orchestrator (durable SQLite checkpointer). The approval web UI builds the same one, so a run
-    paused by either can be resumed by the other (use the same --phase1 / --no-loop flags for both)."""
+    """The CLI's orchestrator (durable checkpointer: SQLite by default, Postgres with LOG_ON_CHECKPOINTER=postgres).
+    The approval web UI builds the same one, so a run paused by either can be resumed by the other (use the same
+    --phase1 / --no-loop flags for both)."""
+    from .checkpointing import make_checkpointer
     runs = Path(runs_dir); runs.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(runs / "checkpoints.sqlite", check_same_thread=False)
     extra = {}
     if not phase1:
         from .memory import MemoryManager, make_memory_store
@@ -46,7 +44,7 @@ def build_orchestrator(runs_dir: str | Path = "runs", phase1: bool = False, no_l
     if not no_loop:
         from .loop import LoopConfig
         extra["loop"] = LoopConfig.from_env(**({"max_attempts": max_attempts} if max_attempts else {}))
-    return Orchestrator(audit_path=runs / "audit.jsonl", outbox=runs / "outbox.jsonl", checkpointer=SqliteSaver(conn),
+    return Orchestrator(audit_path=runs / "audit.jsonl", outbox=runs / "outbox.jsonl", checkpointer=make_checkpointer(runs),
                         **extra)
 
 
@@ -66,7 +64,8 @@ def main() -> None:
     ap.add_argument("--pending", action="store_true", help="list runs waiting for approval")
     ap.add_argument("--auto-approve", action="store_true", help="approve any pause immediately (testing only)")
     ap.add_argument("--runs-dir", default="runs")
-    ap.add_argument("--user", default="rhonda", help="memory namespace (Phase 2)")
+    ap.add_argument("--user", default=os.environ.get("LOG_ON_USER", "rhonda"),
+                    help="memory namespace (Phase 2) and per-user daily budget (step 3)")
     ap.add_argument("--phase1", action="store_true", help="disable Phase 2 memory + knowledge graph")
     ap.add_argument("--no-loop", action="store_true", help="disable the Phase 3 verify/retry/escalate loop")
     ap.add_argument("--max-attempts", type=int, help="Phase 3: attempts before escalating (default 3)")

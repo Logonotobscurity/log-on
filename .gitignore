@@ -19,3 +19,4 @@ reports/
 *.pt
 models/
 *.db
+!.env.example

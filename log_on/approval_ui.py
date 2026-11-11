@@ -24,6 +24,7 @@ import json
 import os
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -234,15 +235,51 @@ def create_app(service: ApprovalService, tokens: dict[str, str] | None = None, s
                              "final_output": res.get("final_output")})
 
     def healthz(request: Request) -> Response:
+        """Liveness: the process answers (no dependencies checked, no auth)."""
         return JSONResponse({"ok": True})
+
+    def readyz(request: Request) -> Response:
+        """Readiness (no auth, no personal data): checkpointer reachable, audit log writable and its last record
+        intact, quota store reachable (approver tokens are required to start at all). 503 if any check fails."""
+        return _readiness(service)
 
     app = Starlette(routes=[
         Route("/", index), Route("/login", login, methods=["GET", "POST"]), Route("/logout", logout),
         Route("/approvals/{run_id}", detail), Route("/approvals/{run_id}/decide", decide, methods=["POST"]),
         Route("/history", history), Route("/api/approvals", api_list),
-        Route("/api/approvals/{run_id}/decide", api_decide, methods=["POST"]), Route("/healthz", healthz)])
+        Route("/api/approvals/{run_id}/decide", api_decide, methods=["POST"]), Route("/healthz", healthz), Route("/readyz", readyz)])
 
     return SecurityHeaders(app)
+
+
+def _readiness(service) -> Response:
+    import json as _json
+    from .checkpointing import backend, ping
+    from .provenance import POLICY_VERSION, code_sha
+    orch, checks = service.orch, {}
+    ok, detail = ping(orch.checkpointer)
+    checks["checkpointer"] = {"ok": ok, "backend": backend(), "detail": detail}
+    try:
+        path = Path(orch.audit.path)
+        writable = os.access(path if path.exists() else path.parent, os.W_OK)
+        last_ok = True
+        if path.exists() and path.stat().st_size:
+            with path.open("rb") as f:
+                f.seek(max(0, path.stat().st_size - 65536))
+                last = f.read().splitlines()[-1]
+            last_ok = "hash" in _json.loads(last)
+        checks["audit_log"] = {"ok": bool(writable and last_ok)}
+    except Exception as e:  # noqa: BLE001
+        checks["audit_log"] = {"ok": False, "detail": type(e).__name__}
+    q = getattr(orch, "quota", None)
+    if q is not None:
+        try:
+            q.used("__readyz__"); checks["quota_store"] = {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            checks["quota_store"] = {"ok": False, "detail": type(e).__name__}
+    ready = all(c["ok"] for c in checks.values())
+    return JSONResponse({"ready": ready, "checks": checks, "code": code_sha(), "policy_version": POLICY_VERSION},
+                        status_code=200 if ready else 503)
 
 
 SECURITY_HEADERS = [
@@ -325,8 +362,8 @@ def _detail_html(p, csrf: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m log_on.approval_ui")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default=os.getenv("LOG_ON_UI_HOST", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=int(os.getenv("LOG_ON_UI_PORT", "8765")))
     ap.add_argument("--runs-dir", default="runs")
     ap.add_argument("--phase1", action="store_true", help="match a CLI started with --phase1")
     ap.add_argument("--no-loop", action="store_true", help="match a CLI started with --no-loop")
