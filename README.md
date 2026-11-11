@@ -1,4 +1,51 @@
-# LOG_ON: Phase 1 (Safe Orchestrator) + Phase 2 (Grounded Memory) + Phase 3 (Autonomous Loop & Telemetry)
+# LOG_ON: Phase 1 (Safe Orchestrator) + Phase 2 (Grounded Memory) + Phase 3 (Autonomous Loop & Telemetry) + Phase 4 (Scale & Optimization)
+
+## Quickstart
+
+```bash
+git clone https://github.com/Logonotobscurity/log-on.git && cd log-on
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt      # Python 3.11+ (built on 3.13)
+.venv/bin/python -m pytest -q                      # full suite (Neo4j / live-model tests skip without config)
+.venv/bin/python -m log_on.evals                   # eval gate: hand-written + red-team regression cases
+.venv/bin/python -m log_on "Send the Q3 revenue report to finance@acme.example"   # pauses for approval
+.venv/bin/python -m log_on --resume <run_id> --approve
+.venv/bin/python -m log_on.demo --phase4           # serving, DSPy approval gate, red team (offline)
+```
+
+Everything runs offline with rule-based components. To put a real model in the loop, start a local one
+(`scripts/serve_llamacpp.sh 1.5b 8082`) or set a hosted key, then `export LOG_ON_LLM_PROVIDER=llamacpp` (see Phase 4).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U([User goal]) --> I[intake] --> P{input policy<br/>normalised + decoded}
+    P -- refused --> A[(audit log<br/>hash-chained)]
+    P --> M[memory retrieval] --> K[knowledge retrieval<br/>Kuzu / Neo4j graph]
+    K --> PL[planner<br/>rules / LLM / DSPy]
+    PL --> PE{permission<br/>risk tiers, recipient provenance,<br/>PII data-flow, plan refs}
+    PE -- refused --> A
+    PE -- high risk --> AP[[human approval ⏸]]
+    PE -- low/medium --> X
+    AP -- approved --> X[action: MCP tools]
+    AP -- denied --> A
+    X --> V[output guards<br/>PII redaction, secrets]
+    V --> VE{verifier}
+    VE -- failed, retries left --> PL
+    VE -- give up --> E[[escalation ⏸]]
+    VE -- passed --> MU[memory update] --> A
+    E --> A
+    subgraph Serving [Phase 4 serving layer]
+      S[Provider: vLLM GPU / llama.cpp CPU /<br/>Ollama / OpenAI / xAI / fake]
+    end
+    PL -.-> S
+    VE -.-> S
+    subgraph Learning [Phase 4 learning + red team]
+      D[DSPy optimiser] --> R[(prompt registry)] -- human approve --> PL
+      RT[red-team harness + Giskard] --> EV[(eval regression cases)]
+    end
+```
+
 
 A working, offline, fully tested agent pipeline that implements the first half of the LOG_ON
 architecture with real libraries:
@@ -81,12 +128,46 @@ any edge into planning / replan / approval / action / verification ──over bu
 Current numbers: **103 tests** (97 pass, 6 Neo4j tests skip without a server). **Eval suite: 50/50 cases pass, overall 1.0,
 attack pass rate 1.0, 0 PII leaks** with the rule-based planner (see the honest caveat under limitations).
 
+## Phase 4: Scale & Optimization
+
+The model is now a swappable, measured component; prompts are optimised by DSPy but promoted only by a human; and the
+whole agent is attacked automatically, with every fixed attack frozen as a regression eval.
+
+| Layer | Implementation | File |
+|---|---|---|
+| Serving | One OpenAI-compatible `Provider` (stdlib HTTP, retries, JSON mode, lenient JSON parsing, usage capture) used by the planner, verifier, KG extractor, DSPy and the red team. Presets: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `fake` (deterministic test server with error / garbage / malicious / slow modes). Self-hosted models cost $0/token in the budget ledger | `log_on/serving/`, `log_on/llm.py` |
+| GPU / CPU deploy | vLLM docker-compose (PagedAttention, continuous batching, prefix caching) for a GPU host; llama.cpp `llama-server` script for CPU (used here: Qwen2.5-1.5B-Instruct Q4_K_M) | `deploy/vllm/`, `scripts/serve_llamacpp.sh` |
+| Benchmark | Concurrency sweep: req/s, tok/s, latency and TTFT p50/p95, valid-plan rate | `log_on/serving/bench.py`, `docs/benchmark_phase4.md` |
+| DSPy | `PlannerProgram` / verifier signatures, BootstrapFewShot (MIPROv2 optional), metric built from the Phase 3 trajectory grader, full-suite eval gate | `log_on/learning/` |
+| Human promotion gate | Versioned prompt registry: the optimiser can only *propose*; `approve --by NAME` refuses machine actors, re-checks sha256 + scores + gate; hash-chained `approvals.jsonl`; runtime sha256 check | `log_on/learning/registry.py`, `prompts/` |
+| Red team | 186 generated attacks (14 seeds × 14 obfuscations + compromised planner, poisoned PDF, planted memory) run through the full graph with an effect oracle; Giskard 2.x scan script | `log_on/redteam/`, `scripts/giskard_scan.py` |
+| Fixes | Normalised/decoded input policy, jailbreak rules, recipient provenance, PII data-flow to trusted domains only, plan-reference integrity, qualified credential statements | `log_on/policy.py`, `log_on/permissions.py`, `log_on/guards/validators.py` |
+| Regression evals | Every defended attack is exported to `evals/cases_redteam.yaml` and loaded by the eval gate | `evals/cases_redteam.yaml`, `log_on/evals/runner.py` |
+
+Measured on this machine (8 vCPU, no GPU): Qwen2.5-1.5B on llama.cpp does 0.81 req/s at 1 concurrent request and
+1.64 req/s at 4 (valid plans 88–94%). DSPy lifted the dev plan metric 0.19 → 0.81 but the full-suite gate **failed**
+(attack pass rate 0.93), so nothing was promoted. The red team went from 19 successful attacks to 0 (rule planner) and,
+with the live model as planner, 3 → 1 → 0. Details: `docs/benchmark_phase4.md`, `docs/dspy_report_phase4.md`,
+`docs/redteam_report_phase4.md`.
+
+```bash
+scripts/serve_llamacpp.sh 1.5b 8082               # downloads llama.cpp + GGUF into ~/.local / ~/.cache (not the repo)
+export LOG_ON_LLM_PROVIDER=llamacpp LOG_ON_LLM_BASE_URL=http://127.0.0.1:8082/v1 LOG_ON_LLM_MODEL=qwen2.5-1.5b-instruct
+.venv/bin/python -m log_on.serving.bench --provider llamacpp --concurrency 1,2,4,8 --requests 16
+.venv/bin/python -m log_on.learning optimize --provider llamacpp --report /tmp/dspy.json   # proposes, never activates
+.venv/bin/python -m log_on.learning list --verify
+.venv/bin/python -m log_on.learning approve <version> --by <your name>     # refused unless the gate passed
+.venv/bin/python -m log_on.redteam --gate                                   # rule planner, exit 1 on any successful attack
+.venv/bin/python -m log_on.redteam --planner llm --provider llamacpp       # live model as planner
+LOG_ON_PLANNER=dspy .venv/bin/python -m log_on "Look up customer C-1001"   # uses the approved DSPy program, if any
+```
+
 ## Run it
 
 ```bash
 cd log_on
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # or python -m venv + pip
-.venv/bin/python -m pytest -v                    # 103 tests (26 Phase 1 + 38 Phase 2 + 39 Phase 3; 6 need Neo4j, else skipped)
+.venv/bin/python -m pytest -v                    # 156 tests across Phases 1-4 (6 need Neo4j, 1 needs a live model, else skipped)
 .venv/bin/python -m log_on.evals                 # Phase 3 trajectory eval suite + threshold gate (exit 1 on failure)
 .venv/bin/python -m log_on.demo --phase3         # Phase 3 walkthrough (loop, escalation, re-approval, budget, trace replay, evals)
 .venv/bin/python -m log_on "What is 2^10 + 5"    # verifier catches 10+5, reviser retries with 2**10 + 5
@@ -111,7 +192,10 @@ Environment variables:
 
 | Var | Effect |
 |---|---|
-| `LOG_ON_LLM_API_KEY` (or `OPENAI_API_KEY`) | switch planning to `LLMPlanner` |
+| `LOG_ON_LLM_PROVIDER` | Phase 4: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `fake`, or `none` (force rules) |
+| `LOG_ON_PLANNER` | `dspy` to use the human-approved DSPy planner program from `prompts/registry.json` |
+| `LOG_ON_TRUSTED_DOMAINS` | comma list of domains customer records may be emailed to (default `acme.example`) |
+| `LOG_ON_LLM_API_KEY` (or `OPENAI_API_KEY`) | switch planning to `LLMPlanner` (hosted `openai` preset if no provider is set) |
 | `LOG_ON_LLM_BASE_URL`, `LOG_ON_LLM_MODEL` | any OpenAI-compatible endpoint (OpenAI, Together, a local vLLM/Ollama server) |
 | `LOG_ON_GUARD_BACKEND` | `native` (default), `guardrails`, or `auto` |
 | `LOG_ON_GRAPH_BACKEND` | `kuzu` (default) or `neo4j` |
@@ -134,6 +218,8 @@ whenever `NEO4J_PASSWORD` is set and the server is reachable.
 Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/phase4_study_notes.md`: Efficiently Serving LLMs / vLLM, DSPy, Red Teaming LLM Applications mapped to code, 3 exercises each.
+- `docs/benchmark_phase4.md`, `docs/dspy_report_phase4.md`, `docs/redteam_report_phase4.md`, `docs/demo_output_phase4.txt`, `docs/eval_report_phase4.txt`, `docs/test_results_phase4.txt`: Phase 4 results (raw JSON in `docs/benchmarks/`, `docs/redteam/`).
 - `docs/phase3_study_notes.md`: Loop Engineering, Automated Testing for LLMOps, Evaluating & Debugging GenAI and Evaluating AI Agents mapped to code, 3 exercises each.
 - `docs/demo_output_phase3.txt`, `docs/eval_report_phase3.txt`, `docs/test_results_phase3.txt`: captured Phase 3 runs.
 - `docs/phase2_study_notes.md`: concepts from the Knowledge Graph, Long-Term Memory and Document AI courses mapped to code, with 3 exercises each.
@@ -144,6 +230,13 @@ Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" repor
 - `docs/demo_output.txt`, `docs/test_results.txt`: captured Phase 1 runs.
 
 ## Known limitations (honest list)
+
+Phase 4:
+- **No GPU here.** The vLLM deployment (`deploy/vllm`) is configured and documented but has **not been run**; all model numbers come from llama.cpp on an 8-vCPU machine with Qwen2.5-1.5B/0.5B (Q4_K_M). 16 requests per concurrency level is a small sample.
+- **DSPy did not produce a promotable prompt.** All three proposed versions improved the dev metric but failed the full-suite gate (attack pass rate 0.91–0.93, approval metric < 1.0). The DSPy planner path is therefore unused by default (`active: null`). The verifier program was trained on only 2 examples.
+- **Red-team coverage is generated, not adversarial.** 186 attacks from 14 seeds; the input policy is still regex-based (with normalisation). Normalisation is used only for matching, and it can mangle text (e.g. `@` → `a`), so the raw goal is always checked too. Live-model runs vary between runs.
+- **Giskard** ran only the non-LLM-assisted detectors (jailbreak, control-character injection) in a separate Python 3.11 venv; the LLM-assisted detectors need a stronger judge model.
+- The trusted-domain rule (`LOG_ON_TRUSTED_DOMAINS`, default `acme.example`) must be configured per organisation, or customer records can't be emailed at all.
 
 Phase 3:
 - **The 1.0 eval score is self-graded.** The 50 cases were written alongside the rule planner and verifier they test, so the score mainly shows the code and the cases agree. It is a regression net, not evidence of general quality. Independent cases and a real LLM run (study notes, Evaluating AI Agents exercises 1 and 3) are the next step.

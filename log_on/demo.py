@@ -1,6 +1,7 @@
 """python -m log_on.demo            -- Phase 1 scenarios (safe orchestrator)
 python -m log_on.demo --phase2   -- Phase 2 scenarios (PDF -> knowledge graph -> multi-hop QA + long-term memory)
 python -m log_on.demo --phase3   -- Phase 3 scenarios (verify/retry/escalate loop, budgets, tracing, trajectory evals)
+python -m log_on.demo --phase4   -- Phase 4 scenarios (model serving, DSPy + human approval gate, red teaming)
 """
 from __future__ import annotations
 
@@ -287,4 +288,8 @@ def phase3() -> None:
 
 if __name__ == "__main__":
     import sys
-    phase3() if "--phase3" in sys.argv else phase2() if "--phase2" in sys.argv else main()
+    if "--phase4" in sys.argv:
+        from .demo_phase4 import phase4
+        phase4()
+    else:
+        phase3() if "--phase3" in sys.argv else phase2() if "--phase2" in sys.argv else main()

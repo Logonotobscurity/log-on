@@ -1,4 +1,4 @@
-# LOG_ON roadmap: analysis of the plan and tickets for Phases 2–4
+# LOG_ON roadmap: analysis of the plan, tickets for Phases 2–4, and what next
 
 > Phase 1 was planned from the plan's outline. Phase 2 was built against the full plan text (18 courses across 6 pillars and
 > 4 phases). The 13-layer order is intake → memory → policy → orchestration → planning → permission → action → validation → approval →
@@ -10,7 +10,7 @@
 | 1 Safe Orchestrator | Goal → MCP tool → blocked if output violates a guardrail | **Done** (26 tests) |
 | 2 Grounded Memory | Raw PDF → entities in Neo4j → multi-hop QA from the orchestrator, with session state | **Done** (38 tests). Kuzu embedded is the default backend and Neo4j 5 is supported and tested on the same Cypher. Long-term memory has semantic, episodic and procedural stores |
 | 3 Autonomous Loop & Telemetry | Verification loop, W&B traces, CI eval gate | **Done** (39 tests; 50-case eval suite, 1.0 with the rule planner). Verify → revise → retry → escalate loop, per-run budgets, OpenTelemetry traces (local JSONL; OTLP / Langfuse optional; W&B replaced by OTel), trajectory grader, GitHub Actions gate |
-| 4 Scale & Optimization | vLLM, DSPy, Giskard red-team | Next |
+| 4 Scale & Optimization | vLLM, DSPy, Giskard red-team | **Done, with caveats** (156 tests incl. 53 Phase 4; eval gate 242 cases incl. 186 red-team regressions, 1.0). OpenAI-compatible serving layer, vLLM GPU config (not run: no GPU) + llama.cpp CPU path benchmarked (Qwen2.5-1.5B), DSPy BootstrapFewShot with grader metric and human-approval registry (3 versions proposed, all correctly refused by the gate), red-team harness (19 → 0 successful attacks; live model 3 → 0) + Giskard scan (0 issues) |
 
 **Deviation from the plan's order:** the plan puts *memory* before *policy*. LOG_ON runs `memory_retrieval` **after** the input policy,
 so a refused or injected prompt never reads (or poisons) memory or the graph. Memory *writes* happen after output validation.
@@ -86,3 +86,21 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 - **D-3** Model serving decision: a hosted API vs vLLM on a rented GPU, decided on E-3 results and cost from O-1.
 - **G-1** Governance registry: tools, data classes, owners and policy versions (local table; UC only if on Databricks).
 - **O-3** Version prompts, policies and validator configs, and stamp the versions into every audit record.
+
+
+## What next (after Phase 4)
+
+Phase 4 is built, but three results say where the real work is:
+
+1. **A stronger model.** The 1.5B CPU model plans validly 88–94% of the time and its DSPy-optimised prompt failed
+   the safety gate. Next: run `deploy/vllm` on a rented GPU (Qwen2.5-7B/14B) or set a hosted key, re-run
+   `log_on.serving.bench`, `log_on.learning optimize` and `log_on.redteam --planner llm`, and record the numbers
+   (ticket D-3 can then be decided on data).
+2. **Promotion with real data (L-1, L-2).** Capture approver notes and deny reasons as training data, add safe-refusal
+   examples, try `--optimizer mipro`. Promote only when the full-suite gate passes, with a named approver.
+3. **Beyond regex safety (V-1).** The policy and redactor are still pattern-based; add Presidio / an ML injection
+   classifier behind the same interfaces and re-run the red team. Grow the attack seeds beyond 14.
+4. **Operational gaps.** An approval UI instead of the CLI (still open), container + deploy (D-2) with a Postgres
+   checkpointer, stamping prompt/policy versions into every audit record (O-3), per-user/day budgets.
+5. **CI.** The GitHub Actions workflow (tests, eval gate, red-team gate, registry check) is in place but cannot run
+   while the GitHub account has a billing lock. Clearing that makes every push gated automatically.

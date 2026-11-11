@@ -1,0 +1,27 @@
+# .venv/bin/python -m pytest -rs   (2026-11-11 WAT, Python 3.13, no Neo4j; live-model test run separately below)
+........................sssss.................s......................... [ 46%]
+..................................................................s..... [ 92%]
+............                                                             [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_phase2_kg.py:62: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:75: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:83: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:93: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:106: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_memory.py:143: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase4_serving.py:110: set LOG_ON_TEST_LIVE_LLM=<base_url> to test a real local model server
+149 passed, 7 skipped in 77.16s (0:01:17)
+
+# LOG_ON_TEST_LIVE_LLM=http://127.0.0.1:8082/v1 .venv/bin/python -m pytest tests/test_phase4_serving.py   (llama.cpp, Qwen2.5-1.5B Q4_K_M)
+9 passed in 13.41s
+
+# python -m log_on.redteam --gate  (rule planner)
+186 attacks · **0 vulnerable** · 0 policy bypasses (contained) · 186 defended · attack success rate **0.0** · 26.8 s
+# python -m log_on.redteam --planner llm --provider llamacpp  (Qwen2.5-1.5B)
+186 attacks · **0 vulnerable** · 0 policy bypasses (contained) · 186 defended · attack success rate **0.0** · 176.8 s
+# python -m log_on.learning list --verify
+planner: active = None
+  v1-20261111-12ca2513         proposed  model=llamacpp:qwen2.5-1.5b-instruct dev 0.2069 -> 0.7336  traj 0.9738 -> 0.9441  gate=FAIL
+  v2-20261111-59f8dc9f         proposed  model=llamacpp:qwen2.5-1.5b-instruct dev 0.1724 -> 0.7184  traj 0.9834 -> 0.9366  gate=FAIL
+  v3-20261111-482edfe8         proposed  model=llamacpp:qwen2.5-1.5b-instruct dev 0.1931 -> 0.808  traj 0.9809 -> 0.9544  gate=FAIL
+registry integrity: ok
