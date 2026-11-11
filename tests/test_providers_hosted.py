@@ -1,6 +1,7 @@
 """Hosted providers (Groq, OpenRouter): presets, key isolation, headers, 429 handling, pacing, per-provider cost,
 and the provider comparison report. Everything runs against the local fake server: no API keys, no network."""
 import json
+import urllib.error
 import time
 from email.utils import formatdate
 
@@ -209,3 +210,87 @@ def test_evals_cli_llm_planner_on_fake_server(capsys):
         rc = evals_main(["--only", "N01,N03", "--planner", "llm", "--provider", "llamacpp", "--base-url", fs.base_url])
     out = capsys.readouterr().out
     assert rc == 0 and "planner: llm on llamacpp" in out and '"planner_calls": 2' in out
+
+
+# --- Groq bring-up fixes: Cloudflare User-Agent block, reasoning models, fail-fast preflight -------------------
+
+def test_user_agent_is_sent_and_cloudflare_block_is_explained():
+    import urllib.request
+    with FakeServer(block_python_urllib=True) as fs:
+        req = urllib.request.Request(f"{fs.base_url}/chat/completions", data=b"{}", method="POST")
+        with pytest.raises(urllib.error.HTTPError) as ei:      # what urllib's default UA gets from Cloudflare
+            urllib.request.urlopen(req, timeout=5)
+        from log_on.serving.providers import http_error_summary
+        msg = http_error_summary(ei.value)
+        assert msg.startswith("HTTP 403") and "Cloudflare" in msg and "1010" in msg and "User-Agent" in msg
+        p = make_provider("groq", base_url=fs.base_url, env={"GROQ_API_KEY": FAKE_GROQ, **NO_PACING})
+        assert p.chat([{"role": "user", "content": "hi"}]).content             # our UA passes
+        assert fs.last_headers["User-Agent"].startswith("log-on/")
+        r = stream_once(p, "sys", "plan", max_tokens=16)
+        assert r["output"] and fs.last_headers["User-Agent"].startswith("log-on/")
+
+
+def test_http_error_message_reaches_bench_report():
+    from log_on.serving.bench import run_level
+    with FakeServer(rate_limit_first=99) as fs:
+        p = make_provider("groq", base_url=fs.base_url, rate_limit_retries=0, env={"GROQ_API_KEY": FAKE_GROQ, **NO_PACING})
+        row = run_level(p, 1, 2, 16)
+        assert row["ok"] == 0 and row["errors"] == 2 and "RateLimitError" in row["error_samples"][0]
+
+
+def test_reasoning_model_that_used_up_max_tokens_is_an_error_not_an_empty_plan():
+    from log_on.planner import LLMPlanner
+    from log_on.serving import ProviderError
+    with FakeServer(mode="truncated") as fs:
+        p = make_provider("groq", base_url=fs.base_url, env={"GROQ_API_KEY": FAKE_GROQ, **NO_PACING})
+        with pytest.raises(ProviderError, match="max_tokens=1024 used up by reasoning"):
+            p.chat([{"role": "user", "content": "hi"}])
+        with pytest.raises(RuntimeError, match="empty answer"):
+            stream_once(p, "sys", "plan", max_tokens=20)
+        pl = LLMPlanner(provider=p)
+        pl.plan("What is the total revenue in Q3?")
+        assert "used up" in pl.last_error                                    # counted as a fallback
+    assert PRESETS["groq"]["max_tokens"] >= 1024
+    assert PRESETS["groq"]["extra_body"] == {"reasoning_effort": "low", "include_reasoning": False}
+    assert PRESETS["groq-qwen"]["extra_body"]["reasoning_effort"] == "none"
+
+
+def test_compare_preflight_fails_fast_without_spending_quota(tmp_path):
+    out, md = tmp_path / "c.json", tmp_path / "c.md"
+    with FakeServer(mode="error") as fs:
+        rc = compare_main(["--targets", f"groq@{fs.base_url}", "--out", str(out), "--md", str(md)],
+                          env={"GROQ_API_KEY": FAKE_GROQ, **NO_PACING})
+        assert fs.requests <= 2                                              # 1 preflight (+1 retry), no bench/eval
+    t = json.loads(out.read_text())["targets"][0]
+    assert rc == 0 and t["preflight"]["ok"] is False and "bench" not in t and "eval" not in t
+    assert "preflight failed" in md.read_text()
+
+
+def test_eval_sample_keeps_core_cases_and_stratifies_redteam():
+    from log_on.evals.runner import load_cases
+    from log_on.serving.compare import sample_eval_cases
+    cases = load_cases()
+    core = [c for c in cases if not c["id"].startswith("RT")]
+    s = sample_eval_cases(cases, 150, seed=0)
+    assert len(s) == 150 and all(c in s for c in core)
+    cats = {c["category"] for c in cases if c["id"].startswith("RT")}
+    assert {c["category"] for c in s if c["id"].startswith("RT")} == cats
+    assert sample_eval_cases(cases, 10_000) == cases
+
+
+def test_small_eval_sample_and_merge(tmp_path):
+    from log_on.evals.runner import load_cases
+    from log_on.serving.compare import sample_eval_cases
+    s = sample_eval_cases(load_cases(), 20, seed=0)
+    cats = {c["category"].split(":")[0] for c in s}
+    assert len(s) == 20 and len({c["id"] for c in s}) == 20 and {"normal", "edge", "attack"} <= cats
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    for p, name in ((a, "groq"), (b, "openrouter-free")):
+        p.write_text(json.dumps({"generated": "x", "config": {"concurrency": [1], "requests": 6, "redteam": "s"},
+                                 "targets": [{"target": name, "preset": name, "skipped": "KEY not set"}]}))
+    notes = tmp_path / "n.md"
+    notes.write_text("## Notes\nreduced scope")
+    rc = compare_main(["--merge", f"{a},{b}", "--notes", str(notes), "--out", str(tmp_path / "m.json"),
+                       "--md", str(tmp_path / "m.md")], env={})
+    md = (tmp_path / "m.md").read_text()
+    assert rc == 0 and "groq" in md and "openrouter-free" in md and "reduced scope" in md

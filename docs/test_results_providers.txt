@@ -1,7 +1,7 @@
-..............................................sssss.................s... [ 27%]
-........................................................................ [ 54%]
-.......................s................................................ [ 82%]
-...............................................                          [100%]
+..............................................sssss.................s... [ 26%]
+........................................................................ [ 53%]
+.......................s................................................ [ 80%]
+.....................................................                    [100%]
 =============================== warnings summary ===============================
 .venv/lib/python3.13/site-packages/typer/__init__.py:24
   /workspace/log_on/.venv/lib/python3.13/site-packages/typer/__init__.py:24: DeprecationWarning: 'click.utils.get_binary_stream' is deprecated and will be removed in Click 9.0.
@@ -20,5 +20,5 @@ SKIPPED [1] tests/test_phase2_kg.py:93: Neo4j not reachable (set NEO4J_URI/NEO4J
 SKIPPED [1] tests/test_phase2_kg.py:106: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
 SKIPPED [1] tests/test_phase2_memory.py:143: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
 SKIPPED [1] tests/test_phase4_serving.py:110: set LOG_ON_TEST_LIVE_LLM=<base_url> to test a real local model server
-256 passed, 7 skipped, 2 warnings in 193.88s (0:03:13)
+262 passed, 7 skipped, 2 warnings in 224.42s (0:03:44)
 exit 0

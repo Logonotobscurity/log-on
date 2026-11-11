@@ -17,10 +17,11 @@ import json
 import platform
 import statistics
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .providers import PRESETS, Provider, get_provider, make_provider
+from .providers import PRESETS, Provider, get_provider, http_error_summary, make_provider
 
 GOALS = ["Calculate 1250 * 0.075 + 40", "Look up customer C-1001", "Get the Q3 revenue report",
          "Send the weekly ops report to ops@acme.example", "Show the weekly ops report",
@@ -42,14 +43,15 @@ def stream_once(provider: Provider, system: str, user: str, max_tokens: int = 96
             "stream_options": {"include_usage": True}, "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     t0 = time.perf_counter()
-    ttft, text, ctoks = None, [], None
+    ttft, text, ctoks, finish = None, [], None, None
     # Provider.open adds the preset's headers/extra body, client-side pacing and 429 retry-after handling
     with provider.open("/chat/completions", body, extra_headers={"Accept": "text/event-stream"}) as resp:
         ctype = resp.headers.get("Content-Type", "")
         if "event-stream" not in ctype:  # server ignored stream=True (e.g. the fake server)
             data = json.loads(resp.read())
             ttft = (time.perf_counter() - t0) * 1000
-            text = [data["choices"][0]["message"]["content"]]
+            text = [data["choices"][0]["message"].get("content") or ""]
+            finish = data["choices"][0].get("finish_reason")
             ctoks = (data.get("usage") or {}).get("completion_tokens")
         else:
             for raw in resp:
@@ -62,9 +64,11 @@ def stream_once(provider: Provider, system: str, user: str, max_tokens: int = 96
                 ev = json.loads(payload)
                 if ev.get("error"):  # e.g. OpenRouter mid-stream rate limit (HTTP 200 already sent)
                     raise RuntimeError(f"stream error {ev['error'].get('code')}: {str(ev['error'].get('message'))[:120]}")
-                if ev.get("usage"):
-                    ctoks = ev["usage"].get("completion_tokens")
+                usage = ev.get("usage") or (ev.get("x_groq") or {}).get("usage")  # Groq: usage in x_groq
+                if usage:
+                    ctoks = usage.get("completion_tokens")
                 for ch in ev.get("choices") or []:
+                    finish = ch.get("finish_reason") or finish
                     piece = (ch.get("delta") or {}).get("content")
                     if piece:
                         if ttft is None:
@@ -72,10 +76,14 @@ def stream_once(provider: Provider, system: str, user: str, max_tokens: int = 96
                         text.append(piece)
     total = (time.perf_counter() - t0) * 1000
     out = "".join(text)
+    if not out.strip() and finish == "length":
+        raise RuntimeError(f"empty answer: max_tokens={max_tokens} used up (reasoning models think first)")
     ctoks = ctoks or max(1, len(out) // 4)
     decode_ms = max(total - (ttft or total), 1e-6)
     return {"latency_ms": total, "ttft_ms": ttft or total, "completion_tokens": ctoks,
-            "decode_tps": ctoks / (decode_ms / 1000) if ctoks > 1 else 0.0, "output": out}
+            # JSON mode on Groq arrives as one chunk (no token streaming): fall back to end-to-end tokens/s
+            "decode_tps": (ctoks / (decode_ms / 1000) if len(text) > 1 else ctoks / (total / 1000)) if ctoks > 1 else 0.0,
+            "chunks": len(text), "output": out}
 
 
 def valid_plan(text: str) -> bool:
@@ -96,6 +104,8 @@ def run_level(provider: Provider, concurrency: int, n: int, max_tokens: int) -> 
     def one(goal: str):
         try:
             return stream_once(provider, SYSTEM_PROMPT, goal, max_tokens)
+        except urllib.error.HTTPError as exc:
+            errors.append(f"HTTPError: {http_error_summary(exc)}")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{type(exc).__name__}: {exc}")
             return None

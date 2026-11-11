@@ -10,6 +10,9 @@ Behaviour is chosen per request from the system prompt:
 
 Modes (constructor / --mode) simulate failure cases the stack must survive:
   normal | error (HTTP 500) | garbage (non-JSON) | malicious (planner returns an exfiltration plan) | slow
+  | truncated (a reasoning model that spent max_tokens thinking: empty content, finish_reason "length")
+`block_python_urllib=True` answers requests whose User-Agent is urllib's default with Cloudflare's 403 / error 1010
+page, as api.groq.com does.
 `rate_limit_first=N` answers the first N chat requests with HTTP 429 (+ `rate_limit_headers`, e.g. Retry-After or
 Groq's x-ratelimit-reset-tokens), like a hosted free tier. The last request's headers and body are kept in
 `last_headers` / `last_body` so tests can check what a preset sends (memory only, never logged).
@@ -63,11 +66,13 @@ def respond(system: str, user: str, mode: str = "normal") -> str:
 class FakeServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0, mode: str = "normal", delay_ms: float = 0,
                  per_token_ms: float = 0, slots: int = 0, model: str = "log-on-fake", rate_limit_first: int = 0,
-                 rate_limit_headers: dict | None = None, report_cost: float | None = None):
+                 rate_limit_headers: dict | None = None, report_cost: float | None = None,
+                 block_python_urllib: bool = False):
         self.mode, self.delay_ms, self.per_token_ms, self.model = mode, delay_ms, per_token_ms, model
         self.rate_limit_first, self.rate_limited = rate_limit_first, 0
         self.rate_limit_headers = {"Retry-After": "0"} if rate_limit_headers is None else rate_limit_headers
         self.report_cost = report_cost
+        self.block_python_urllib = block_python_urllib
         self.last_headers: dict = {}
         self.last_body: dict = {}
         self.requests = 0
@@ -121,6 +126,12 @@ class FakeServer:
                     if limited:
                         srv.rate_limited += 1
                 try:
+                    if srv.block_python_urllib and self.headers.get("User-Agent", "").startswith("Python-urllib"):
+                        page = (b"<!doctype html><html><head><title>Access denied | api.example used Cloudflare to "
+                                b"restrict access</title></head><body><h2>Error code: <span>1010</span></h2>"
+                                b"<p>The owner of this website has banned your access based on your browser's "
+                                b"signature.</p></body></html>")
+                        return self._send(403, page, {"Server": "cloudflare"})
                     if limited:
                         return self._send(429, {"error": {"code": 429, "message": "Rate limit exceeded"}},
                                           srv.rate_limit_headers)
@@ -130,6 +141,12 @@ class FakeServer:
                     system = next((m["content"] for m in msgs if m.get("role") == "system"), "")
                     user = next((m["content"] for m in reversed(msgs) if m.get("role") == "user"), "")
                     content = "sorry, I can't do JSON" if srv.mode == "garbage" else respond(system, user, srv.mode)
+                    if srv.mode == "truncated":
+                        return self._send(200, {
+                            "id": f"fake-{srv.requests}", "object": "chat.completion", "model": srv.model,
+                            "choices": [{"index": 0, "finish_reason": "length", "message": {
+                                "role": "assistant", "content": "", "reasoning": "The user wants... let me think"}}],
+                            "usage": {"prompt_tokens": 50, "completion_tokens": req.get("max_tokens") or 20}})
                     ptoks = max(1, sum(len(str(m.get("content", ""))) for m in msgs) // 4)
                     ctoks = max(1, len(content) // 4)
                     t0 = time.perf_counter()
@@ -175,7 +192,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m log_on.serving.fake_server")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8099)
-    ap.add_argument("--mode", default="normal", choices=["normal", "error", "garbage", "malicious", "slow"])
+    ap.add_argument("--mode", default="normal", choices=["normal", "error", "garbage", "malicious", "slow", "truncated"])
     ap.add_argument("--delay-ms", type=float, default=0)
     a = ap.parse_args(argv)
     srv = FakeServer(a.host, a.port, a.mode, a.delay_ms)

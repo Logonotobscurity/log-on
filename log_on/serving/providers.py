@@ -37,6 +37,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 
+USER_AGENT = "log-on/0.1 (+https://github.com/Logonotobscurity/log-on)"
 OPENROUTER_HEADERS = {
     # App attribution (https://openrouter.ai/docs/app-attribution): HTTP-Referer identifies the app,
     # X-OpenRouter-Title names it (X-Title is the older, still-supported name). "hidden" keeps a new app out of the
@@ -217,7 +218,10 @@ class Provider:
 
     def request_headers(self, extra: dict | None = None) -> dict:
         c = self.config
-        return {**c.headers, "Authorization": f"Bearer {c.api_key or 'local'}", "Content-Type": "application/json",
+        # An explicit User-Agent is required: Cloudflare in front of api.groq.com answers urllib's default
+        # "Python-urllib/3.x" with HTTP 403 (error 1010, "browser signature banned").
+        return {"User-Agent": os.environ.get("LOG_ON_USER_AGENT", USER_AGENT), **c.headers,
+                "Authorization": f"Bearer {c.api_key or 'local'}", "Content-Type": "application/json",
                 **(extra or {})}
 
     def open(self, path: str, body: dict, extra_headers: dict | None = None, timeout: float | None = None):
@@ -241,7 +245,7 @@ class Provider:
                     continue
                 if exc.code in RETRYABLE or transient_402:
                     self.stats["rate_limited"] += 1
-                    raise RateLimitError(f"{c.name}: HTTP {exc.code} after {attempt + 1} attempts") from exc
+                    raise RateLimitError(f"{c.name}: {http_error_summary(exc)} (after {attempt + 1} attempts)") from exc
                 raise
         raise RateLimitError(f"{c.name}: rate limited")  # pragma: no cover
 
@@ -282,7 +286,7 @@ class Provider:
                     body.pop("response_format")
                     continue
                 if exc.code < 500:
-                    raise ProviderError(f"{c.name}: HTTP {exc.code}") from exc
+                    raise ProviderError(f"{c.name}: {http_error_summary(exc)}") from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
                 last = exc
             attempt += 1
@@ -291,9 +295,14 @@ class Provider:
             time.sleep(0.2 * attempt)
         latency = round((time.perf_counter() - t0) * 1000, 1)
         try:
-            content = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as exc:
+            choice = data["choices"][0]
+            content = choice["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError(f"{c.name}: malformed response") from exc
+        if not content.strip() and choice.get("finish_reason") == "length":
+            # reasoning models (gpt-oss, qwen3) can spend the whole max_tokens budget thinking
+            raise ProviderError(f"{c.name}: empty answer, max_tokens={body.get('max_tokens')} used up"
+                                + (" by reasoning" if choice["message"].get("reasoning") else ""))
         u = data.get("usage") or {}
         prompt_text = "".join(str(m.get("content", "")) for m in messages)
         usage = {"model": c.model, "provider": c.name, "calls": 1,
@@ -324,6 +333,30 @@ class Provider:
 
     def __repr__(self) -> str:
         return f"Provider({self.config.name}, {self.config.model} @ {self.config.base_url})"
+
+
+def http_error_summary(exc: urllib.error.HTTPError) -> str:
+    """Short, key-free description of an HTTP error: status plus the provider's error message (or the Cloudflare
+    block reason), so failures are visible in bench/compare reports instead of a bare 'HTTP 403'."""
+    body = _peek(exc)
+    msg = ""
+    try:
+        err = json.loads(body).get("error")
+        msg = (err.get("message") if isinstance(err, dict) else str(err or "")) or ""
+        meta = err.get("metadata") if isinstance(err, dict) else None
+        if isinstance(meta, dict):  # OpenRouter: which upstream failed and its own message
+            if meta.get("provider_name"):
+                msg += f" [upstream {meta['provider_name']}]"
+            if meta.get("raw"):
+                msg += f" {str(meta['raw'])[:160]}"
+    except (ValueError, AttributeError):
+        if "cloudflare" in body.lower():
+            code = re.search(r"error code:?\s*(?:<[^>]+>\s*)*(\d{4})", body, re.I)
+            msg = "blocked by Cloudflare" + (f" (error {code.group(1)})" if code else "") + \
+                  " - check the User-Agent header"
+        else:
+            msg = re.sub(r"<[^>]+>|\s+", " ", body).strip()[:120]
+    return f"HTTP {exc.code}" + (f": {msg[:200]}" if msg else "")
 
 
 def _peek(exc: urllib.error.HTTPError) -> str:

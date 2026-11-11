@@ -52,6 +52,25 @@ date), Groq's `x-ratelimit-reset-tokens` / `-requests` (`7.66s`, `2m59.56s`), Op
 client-side per (base URL, model) to the preset's RPM. `provider.stats` counts requests, 429s and seconds waited.
 A mid-stream SSE `error` event (OpenRouter sends these after HTTP 200) fails the benchmark request.
 
+## Bring-up fixes (found on the first real Groq run)
+
+- **User-Agent.** Cloudflare in front of `api.groq.com` answers urllib's default `Python-urllib/3.x` with HTTP 403
+  (error 1010). Every request now sends `User-Agent: log-on/0.1 (+repo URL)` (override: `LOG_ON_USER_AGENT`).
+  HTTP errors are reported with the provider's message or the Cloudflare reason (`http_error_summary`) instead of a
+  bare status, in bench rows (`error_samples`), planner fallbacks and `RateLimitError` (OpenRouter's upstream name
+  and message included).
+- **Reasoning models.** gpt-oss and qwen3 can spend `max_tokens` thinking and return empty content. The presets
+  use `max_tokens` 1024 with `reasoning_effort: low` + `include_reasoning: false` (gpt-oss) or `reasoning_effort:
+  none` (qwen3); an empty answer with `finish_reason: length` is now an explicit error (planner falls back) rather
+  than an empty plan. Groq's streaming usage (`x_groq.usage`) is read; JSON mode on Groq arrives in one chunk, so
+  TTFT ≈ latency there and tok/s is end-to-end.
+- **Fail fast.** The comparison makes one preflight call per target and skips the target if it fails, so a blocked
+  key or model does not burn a daily quota. Bench runs without client pacing (pacing is not latency); planner
+  latency in reports excludes pacing / 429 sleeps.
+- **Quota-bound scope.** `--eval-sample N` (hand-written cases + stratified red-team regressions, or a stratified
+  mix when N is small; thresholds checked but flagged *indicative* below `min_cases`), `--rpm`, and `--merge
+  a.json,b.json --notes notes.md` to combine runs with different scopes into one report.
+
 ## Cost
 
 `log_on/telemetry/cost.py` prices calls per provider (`PROVIDER_PRICES`, the list prices above); any OpenRouter

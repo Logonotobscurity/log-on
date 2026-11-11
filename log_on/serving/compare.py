@@ -95,12 +95,16 @@ class MeteredLLMPlanner(LLMPlanner):
     def plan(self, goal, context=None):
         from ..telemetry.cost import llm_cost
         self.last_usage = None
+        st = self.provider.stats
+        waited0 = st["paced_wait_s"] + st["rate_limit_wait_s"]
         t0 = time.perf_counter()
         steps = super().plan(goal, context)
+        waited = st["paced_wait_s"] + st["rate_limit_wait_s"] - waited0  # client pacing / 429 sleeps: not model time
         u = self.last_usage or {}
         cost = llm_cost(u.get("model"), u.get("prompt_tokens", 0), u.get("completion_tokens", 0),
                         u.get("provider"), u.get("cost_usd")) if u else 0.0
-        self.meter.record(self.last_error is None, u, (time.perf_counter() - t0) * 1000, self.last_error, cost)
+        self.meter.record(self.last_error is None, u, max(0.0, time.perf_counter() - t0 - waited) * 1000,
+                          self.last_error, cost)
         return steps
 
 
@@ -135,6 +139,8 @@ def stratified_sample(attacks: list[dict], n: int, seed: int = 0) -> list[dict]:
     for a in attacks:
         by_cat[a["category"]].append(a)
     cats = sorted(by_cat)
+    if n < len(cats):  # fewer slots than categories: one each from a seeded choice of categories
+        cats = sorted(rng.sample(cats, n))
     alloc = {c: max(1, round(n * len(by_cat[c]) / len(attacks))) for c in cats}
     while sum(alloc.values()) > n:  # trim the largest allocations first, never below 1
         c = max((c for c in cats if alloc[c] > 1), key=lambda c: alloc[c])
@@ -146,7 +152,7 @@ def stratified_sample(attacks: list[dict], n: int, seed: int = 0) -> list[dict]:
     for c in cats:
         by_tech: dict[str, list[dict]] = defaultdict(list)
         for a in by_cat[c]:
-            by_tech[a["technique"]].append(a)
+            by_tech[a.get("technique") or a["id"]].append(a)
         techs = sorted(by_tech)
         rng.shuffle(techs)
         for t in techs:
@@ -163,11 +169,32 @@ def stratified_sample(attacks: list[dict], n: int, seed: int = 0) -> list[dict]:
 
 def run_bench(prov: Provider, levels: list[int], n: int, max_tokens: int) -> dict:
     from .bench import benchmark
-    rep = benchmark(prov, levels, n, max_tokens=max_tokens, warmup=1)
-    return {"max_tokens": max_tokens, "levels": rep["levels"]}
+    # No client pacing during the bench: pacing would be counted as latency and cap c=2 throughput. The bench is
+    # small (warmup + levels x n requests), so it stays inside a 30 RPM tier; 429s are still retried and counted.
+    bp = prov.with_(rpm=None)
+    rep = benchmark(bp, levels, n, max_tokens=max_tokens, warmup=1)
+    for k, v in bp.stats.items():
+        prov.stats[k] = round(prov.stats[k] + v, 2)
+    return {"max_tokens": max_tokens, "levels": rep["levels"], "pacing": "off during bench",
+            "rate_limited": bp.stats["rate_limited"]}
 
 
-def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None) -> dict:
+def sample_eval_cases(cases: list[dict], n: int, seed: int = 0) -> list[dict]:
+    """n cases: all hand-written cases + a category-stratified sample of the frozen red-team regression cases; when n
+    is smaller than the hand-written set, a category-stratified sample of everything (attack cases kept in)."""
+    rt = [c for c in cases if str(c["id"]).startswith("RT")]
+    core = [c for c in cases if not str(c["id"]).startswith("RT")]
+    if n >= len(cases):
+        return cases
+    if n <= len(core):
+        k = max(1, n // 4) if rt else 0  # a quarter from the 532 frozen attacks, the rest from hand-written cases
+        picked = stratified_sample(core, n - k, seed) + (stratified_sample(rt, k, seed) if k else [])
+        return picked[:n]
+    return core + stratified_sample(rt, n - len(core), seed)
+
+
+def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None, sample: int | None = None,
+             seed: int = 0) -> dict:
     from ..evals.__main__ import run_suite
     from ..evals.grader import check_thresholds, summarise
     from ..evals.runner import DEFAULT_CASES, build_graph, load_cases
@@ -175,6 +202,9 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None) -> 
     if only:
         keep = set(only)
         cases = [c for c in cases if c["id"] in keep]
+    total = len(cases)
+    if sample and not only:
+        cases = sample_eval_cases(cases, sample, seed)
     meter = Meter()
     graph = build_graph(work)
     t0 = time.time()
@@ -183,10 +213,17 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None) -> 
     tpath = Path(DEFAULT_CASES).with_name("thresholds.json")
     thresholds = json.loads(tpath.read_text()) if tpath.exists() else {}
     fails = check_thresholds(summary, thresholds) if not only else []
+    min_cases = thresholds.get("min_cases", 0)
+    if len(cases) < total and len(cases) < min_cases:  # a quota-bound sample: judge quality, not suite size
+        fails = [f for f in check_thresholds(summary, {**thresholds, "min_cases": 0})]
     pl = meter.summary()
     fb = pl["fallback_rate"]
     if only:
         verdict = "subset (thresholds not checked)"
+    elif len(cases) < total:
+        verdict = ("FAILED" if fails else "PASSED") + f" on a sample of {len(cases)}/{total} cases"
+        if len(cases) < min_cases:
+            verdict += f" (below min_cases={min_cases}: indicative only)"
     elif fails:
         verdict = "FAILED"
     else:
@@ -196,9 +233,13 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None) -> 
     log(f"  eval: {len(results)} cases, gate {verdict}, planner validity {pl['planner_validity']}")
     keep = ("overall_score", "pass_rate", "attack_pass_rate", "pii_leaks", "metrics", "by_category",
             "total_tokens", "total_cost_usd", "mean_steps")
-    return {"cases": len(results), "gate": verdict, "threshold_failures": fails, "planner": pl,
+    return {"cases": len(results), "cases_total": total, "gate": verdict, "threshold_failures": fails, "planner": pl,
             "summary": {k: summary.get(k) for k in keep},
-            "failed_cases": [r["id"] for r in results if not r["passed"]], "elapsed_s": round(time.time() - t0, 1)}
+            "failed_cases": [r["id"] for r in results if not r["passed"]],
+            "failed_details": [{"id": r["id"], "category": r["category"], "status": r["status"], "tools": r["tools"],
+                                "notes": {k: str(v)[:200] for k, v in r["notes"].items()
+                                          if k == "error" or r["metrics"].get(k, 1) < 1}}
+                               for r in results if not r["passed"]], "elapsed_s": round(time.time() - t0, 1)}
 
 
 def run_redteam(prov: Provider, work: Path, sample: int | None, seed: int, log) -> dict:
@@ -230,6 +271,14 @@ def run_target(t: dict, a, env: dict, log) -> dict:
     entry["model_source"] = MODEL_SOURCES.get(t["preset"]) if not t["model"] else "user-specified"
     work = Path(tempfile.mkdtemp(prefix=f"log_on_compare_{t['preset']}_"))
     log(f"== {t['label']} ({prov.name}:{prov.model})")
+    try:  # one real call first: a blocked / misconfigured target fails fast instead of burning the daily quota
+        r = prov.complete("Reply with a JSON object.", 'Return {"ok": true}.')
+        entry["preflight"] = {"ok": True, "latency_ms": r.latency_ms}
+    except Exception as exc:  # noqa: BLE001
+        entry["preflight"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        entry["http"] = dict(prov.stats)
+        log(f"  preflight FAILED: {entry['preflight']['error']} - skipping this target")
+        return entry
     steps = [s for s in ("bench", "eval", "redteam") if s not in a.skip]
     for step in steps:
         t0 = time.time()
@@ -237,10 +286,14 @@ def run_target(t: dict, a, env: dict, log) -> dict:
             if step == "bench":
                 entry["bench"] = run_bench(prov, a.concurrency, a.requests, a.max_tokens or prov.config.max_tokens)
                 lv = entry["bench"]["levels"]
-                log(f"  bench: " + ", ".join(f"c{r['concurrency']} p50 {r['latency_p50_ms']} ms ok {r['ok']}/"
-                                              f"{r['requests']}" for r in lv))
+                log("  bench: " + ", ".join(f"c{r['concurrency']} p50 {r['latency_p50_ms']} ms ok {r['ok']}/"
+                                             f"{r['requests']}" for r in lv))
+                for r in lv:
+                    if r.get("error_samples"):
+                        log(f"  bench c{r['concurrency']} errors: {r['error_samples'][:2]}")
             elif step == "eval":
-                entry["eval"] = run_eval(prov, work / "eval", log, a.eval_only.split(",") if a.eval_only else None)
+                entry["eval"] = run_eval(prov, work / "eval", log, a.eval_only.split(",") if a.eval_only else None,
+                                         a.eval_sample, a.seed)
             else:
                 entry["redteam"] = run_redteam(prov, work / "redteam", None if a.redteam_full else a.redteam_sample,
                                                a.seed, log)
@@ -248,7 +301,7 @@ def run_target(t: dict, a, env: dict, log) -> dict:
             entry[step] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
             log(f"  {step}: ERROR {entry[step]['error']}")
         entry.setdefault("step_seconds", {})[step] = round(time.time() - t0, 1)
-    entry["http"] = dict(prov.stats)  # requests / 429s / seconds waited on rate limits and pacing
+    entry["http"] = {k: round(v, 1) if isinstance(v, float) else v for k, v in prov.stats.items()}  # requests / 429s / seconds waited on rate limits and pacing
     costs = [entry.get(s, {}).get("planner", {}).get("cost_usd", 0) for s in ("eval", "redteam")]
     entry["planner_cost_usd"] = round(sum(c or 0 for c in costs), 6)
     return entry
@@ -260,11 +313,35 @@ def _fmt(v, nd=None):
     return f"{v:.{nd}f}" if nd is not None and isinstance(v, (int, float)) else str(v)
 
 
+def _scope(t: dict, cfg: dict) -> str:
+    cfg = t.get("run_config") or cfg
+    e = t.get("eval") or {}
+    r = (t.get("redteam") or {}).get("summary") or {}
+    ev = f"eval {e['cases']}/{e.get('cases_total', e['cases'])}" if "cases" in e else "eval –"
+    return (f"bench c={','.join(map(str, cfg.get('concurrency', [])))}×{cfg.get('requests')}, {ev}, "
+            f"red team {r.get('attacks', '–')}" + (f", {cfg['rpm']} rpm" if cfg.get("rpm") else ""))
+
+
+def merge(paths: list[str], notes: str | None = None) -> dict:
+    """Combine several comparison JSON reports (e.g. runs with different quota-bound scopes) into one."""
+    out = {"generated": time.strftime("%Y-%m-%d %H:%M %Z"), "config": {"merged_from": paths}, "targets": []}
+    for p in paths:
+        rep = json.loads(Path(p).read_text())
+        for t in rep["targets"]:
+            t.setdefault("run_config", rep.get("config", {}))
+            t.setdefault("run_generated", rep.get("generated"))
+            out["targets"].append(t)
+    if notes:
+        out["notes_md"] = Path(notes).read_text()
+    return out
+
+
 def to_markdown(rep: dict) -> str:
+    cfg = rep.get("config", {})
+    head = (f"bench concurrency {cfg['concurrency']} × {cfg['requests']} requests · red team: {cfg['redteam']}"
+            if "concurrency" in cfg else "merged runs; scope per target below")
     L = ["# LOG_ON provider comparison", "",
-         f"Generated {rep['generated']} · targets: {', '.join(t['target'] for t in rep['targets'])} · "
-         f"bench concurrency {rep['config']['concurrency']} × {rep['config']['requests']} requests · "
-         f"red team: {rep['config']['redteam']}", "",
+         f"Generated {rep['generated']} · targets: {', '.join(t['target'] for t in rep['targets'])} · {head}", "",
          "| target | model | bench c=1 p50 / p95 ms | out tok/s (c=1) | bench valid plan | eval gate | eval pass rate "
          "| PII leaks | planner validity | red team vuln / bypass / n | planner cost $ | 429s (wait s) |",
          "|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|"]
@@ -272,8 +349,12 @@ def to_markdown(rep: dict) -> str:
         if t.get("skipped"):
             L.append(f"| {t['target']} | – | skipped: {t['skipped']} | | | | | | | | | |")
             continue
+        if not (t.get("preflight") or {}).get("ok", True):
+            L.append(f"| {t['target']} | `{t['provider']['model']}` | preflight failed: {t['preflight']['error'][:80]} "
+                     "| | | | | | | | | |")
+            continue
         b = (t.get("bench") or {}).get("levels") or [{}]
-        b1 = b[0]
+        b1 = b[0] if b[0].get("ok") else {}
         e = t.get("eval") or {}
         r = (t.get("redteam") or {}).get("summary") or {}
         h = t.get("http", {})
@@ -283,6 +364,10 @@ def to_markdown(rep: dict) -> str:
                  f"{_fmt((e.get('summary') or {}).get('pass_rate'))} | {_fmt((e.get('summary') or {}).get('pii_leaks'))} | {_fmt((e.get('planner') or {}).get('planner_validity'))} | "
                  f"{_fmt(r.get('vulnerable'))} / {_fmt(r.get('bypass_contained'))} / {_fmt(r.get('attacks'))} | "
                  f"{_fmt(t.get('planner_cost_usd'), 4)} | {h.get('rate_limited', 0)} ({h.get('rate_limit_wait_s', 0)}) |")
+    L += ["", "| target | scope |", "|---|---|"]
+    for t in rep["targets"]:
+        if not t.get("skipped"):
+            L.append(f"| {t['target']} | {_scope(t, cfg)} |")
     L += ["", "Planner validity = model plans that parsed and used only allow-listed tools ÷ planner LLM calls; the "
           "rest fell back to the rule planner. An eval gate verdict marked *inconclusive* means more than "
           f"{MAX_FALLBACK_FOR_VALID_GATE:.0%} of plans came from the rule fallback, so it mostly measures the rules.",
@@ -291,13 +376,13 @@ def to_markdown(rep: dict) -> str:
         m = (t.get("provider") or {}).get("model") or PRESETS.get(t["preset"], {}).get("model", "–")
         L.append(f"| {t['target']} | `{m}` | {t.get('model_source') or MODEL_SOURCES.get(t['preset'], '–')} |")
     for t in rep["targets"]:
-        if t.get("skipped"):
+        if t.get("skipped") or not (t.get("preflight") or {}).get("ok", True):
             continue
         L += ["", f"## {t['target']}", ""]
         for r in (t.get("bench") or {}).get("levels", []):
             L.append(f"- bench c={r['concurrency']}: {r['ok']}/{r['requests']} ok, p50 {r['latency_p50_ms']} ms, "
                      f"p95 {r['latency_p95_ms']} ms, TTFT p50 {r['ttft_p50_ms']} ms, {r['output_tok_per_s']} out tok/s"
-                     + (f", errors {r['errors'][:2]}" if r.get("errors") else ""))
+                     + (f", errors {r.get('error_samples', [])[:2]}" if r.get("errors") else ""))
         for step in ("eval", "redteam"):
             s = t.get(step) or {}
             if "error" in s:
@@ -314,6 +399,8 @@ def to_markdown(rep: dict) -> str:
         h = t.get("http", {})
         L.append(f"- HTTP: {h.get('requests', 0)} requests, {h.get('rate_limited', 0)} rate-limited, "
                  f"{h.get('rate_limit_wait_s', 0)} s waiting on 429s, {h.get('paced_wait_s', 0)} s client pacing")
+    if rep.get("notes_md"):
+        L += ["", rep["notes_md"].rstrip()]
     return "\n".join(L) + "\n"
 
 
@@ -327,13 +414,27 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     ap.add_argument("--redteam-sample", type=int, default=100, help="stratified attack sample size")
     ap.add_argument("--redteam-full", action="store_true", help="run all 532 attacks instead of a sample")
     ap.add_argument("--eval-only", help="comma list of eval case ids (subset: gate thresholds not checked)")
+    ap.add_argument("--eval-sample", type=int, default=None,
+                    help="all hand-written cases + a stratified sample of red-team regression cases, N in total "
+                         "(to stay inside a daily request quota); thresholds are checked on the sample")
+    ap.add_argument("--rpm", type=float, default=None, help="override client pacing (requests/min) for every target")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=120)
     ap.add_argument("--out", default=str(ROOT / "docs" / "provider_comparison.json"))
     ap.add_argument("--md", default=str(ROOT / "docs" / "provider_comparison.md"))
     ap.add_argument("--dry-run", action="store_true", help="only show targets and whether their keys are set")
+    ap.add_argument("--merge", help="comma list of comparison JSON files to combine into --out/--md (no API calls)")
+    ap.add_argument("--notes", help="markdown file appended to the merged report")
     a = ap.parse_args(argv)
-    env = dict(os.environ) if env is None else env
+    if a.merge:
+        rep = merge([x for x in a.merge.split(",") if x], a.notes)
+        Path(a.out).write_text(json.dumps(rep, indent=2, ensure_ascii=False) + "\n")
+        Path(a.md).write_text(to_markdown(rep))
+        print(to_markdown(rep))
+        return 0
+    env = dict(os.environ) if env is None else dict(env)
+    if a.rpm is not None:
+        env["LOG_ON_LLM_RPM"] = str(a.rpm)
     a.skip = {s.strip() for s in a.skip.split(",") if s.strip()}
     a.concurrency = [int(x) for x in a.concurrency.split(",") if x.strip()]
     targets = [parse_target(s) for s in a.targets.split(",") if s.strip()]
@@ -347,11 +448,12 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     os.environ.setdefault("LOG_ON_TRACE_EXPORTERS", "jsonl")
     rep = {"generated": time.strftime("%Y-%m-%d %H:%M %Z"),
            "config": {"concurrency": a.concurrency, "requests": a.requests, "seed": a.seed,
-                      "skip": sorted(a.skip), "eval_only": a.eval_only,
+                      "skip": sorted(a.skip), "eval_only": a.eval_only, "eval_sample": a.eval_sample,
+                      "rpm": a.rpm,
                       "redteam": "full 532" if a.redteam_full else f"stratified sample of {a.redteam_sample}"},
            "targets": []}
     for t in targets:
-        rep["targets"].append(run_target(t, a, env, log))
+        rep["targets"].append({**run_target(t, a, env, log), "run_config": rep["config"]})
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(rep, indent=2, ensure_ascii=False) + "\n")
