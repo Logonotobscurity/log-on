@@ -1,0 +1,25 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.5, pytest-9.2.0, pluggy-1.7.0
+rootdir: <repo>
+configfile: pytest.ini
+testpaths: tests
+plugins: langsmith-0.14.17, anyio-4.16.0, Faker-37.12.0
+collected 103 items
+
+tests/test_graph.py .........                                            [  8%]
+tests/test_phase2_ingest.py ......                                       [ 14%]
+tests/test_phase2_kg.py .........sssss.......                            [ 34%]
+tests/test_phase2_memory.py ..........s                                  [ 45%]
+tests/test_phase3_evals.py ............                                  [ 57%]
+tests/test_phase3_loop.py ...................                            [ 75%]
+tests/test_phase3_telemetry.py ........                                  [ 83%]
+tests/test_units.py .................                                    [100%]
+
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_phase2_kg.py:62: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:75: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:83: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:93: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:106: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_memory.py:143: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+======================== 97 passed, 6 skipped in 50.17s ========================

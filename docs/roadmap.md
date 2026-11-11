@@ -9,8 +9,8 @@
 |---|---|---|
 | 1 Safe Orchestrator | Goal → MCP tool → blocked if output violates a guardrail | **Done** (26 tests) |
 | 2 Grounded Memory | Raw PDF → entities in Neo4j → multi-hop QA from the orchestrator, with session state | **Done** (38 tests). Kuzu embedded is the default backend and Neo4j 5 is supported and tested on the same Cypher. Long-term memory has semantic, episodic and procedural stores |
-| 3 Autonomous Loop & Telemetry | Verification loop, W&B traces, CI eval gate | Next |
-| 4 Scale & Optimization | vLLM, DSPy, Giskard red-team | Later |
+| 3 Autonomous Loop & Telemetry | Verification loop, W&B traces, CI eval gate | **Done** (39 tests; 50-case eval suite, 1.0 with the rule planner). Verify → revise → retry → escalate loop, per-run budgets, OpenTelemetry traces (local JSONL; OTLP / Langfuse optional; W&B replaced by OTel), trajectory grader, GitHub Actions gate |
+| 4 Scale & Optimization | vLLM, DSPy, Giskard red-team | Next |
 
 **Deviation from the plan's order:** the plan puts *memory* before *policy*. LOG_ON runs `memory_retrieval` **after** the input policy,
 so a refused or injected prompt never reads (or poisons) memory or the graph. Memory *writes* happen after output validation.
@@ -69,16 +69,19 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 - **X-2** Idempotency keys and compensating actions per tool (`send_report` → `recall_report`).
 - **X-3** Per-tool timeouts, retries with backoff, rate limits and a circuit breaker in `mcp_client.py`.
 - **X-4** Remote MCP over Streamable HTTP with OAuth, plus a second real server (Gmail or Drive in read-only mode first).
-- **E-1** Golden eval set (≥50 tasks: goal → expected plan, expected status) run with `pytest -m eval`. Report plan accuracy and refusal accuracy.
-- **E-2** Red-team set (DL.AI red-teaming course): injection, jailbreak, PII exfiltration. Must hold ≥95% refusal or block with 0 PII leaks.
+- ~~**E-1**~~ **Done.** `evals/cases.yaml` (50 cases) + trajectory grader, run with `python -m log_on.evals` and in CI. Scores tool selection, order, policy, approval, output and efficiency.
+- **E-2** *Partly done.* 18 attack cases (injection, PII exfiltration, tool misuse) gate CI at attack pass rate 1.0 and 0 PII leaks. Still to do: generated jailbreak variants (Giskard, Phase 4) and cases written independently of the rules.
 - **E-3** LLM planner live: run E-1 with a real model behind `LOG_ON_LLM_API_KEY` and compare it with the rule planner.
-- **O-1** Cost tracking: a token and cost ledger per run in state and audit, plus a budget guard node that refuses when a run would exceed ₦/$ X.
-- **O-2** OpenTelemetry traces (one span per node and tool call). Export locally to Jaeger or Langfuse.
+- ~~**O-1**~~ **Done (per run).** `usage` ledger in state, audit and spans; `Budget` + `budget_stop` node. Per-user and per-day budgets are still open (**O-1b**).
+- ~~**O-2**~~ **Done.** One span per node and per MCP call, route events, JSONL + `python -m log_on.trace`; OTLP / Langfuse exporters via env.
+- **LP-1** Loop follow-ups: graph-answer verifier, reviser that learns from human retries (procedural memory), offline sweep of `max_attempts` vs. score (Phase 3 study notes).
+- **LP-2** Keep one MCP session per orchestrator (or Streamable HTTP) to remove the ~1 s spawn per action the traces show.
+- **E-4** Two-tier CI: rule evals per commit (done), model-graded evals nightly / on release with an Actions secret; baseline diff per case.
 
 ### Phase 4: Learning, deployment and governance
 - **L-1** A feedback capture step (approver notes, deny reasons) goes into a dataset.
 - **L-2** Proposal-only learning: a job that suggests new policy rules or few-shot examples from failures, opens a PR, and requires E-1 and E-2 to pass in CI.
-- **D-1** CI on GitHub Actions: lint, unit tests, eval suite and secret scan on every PR (translated from the CircleCI course).
+- ~~**D-1**~~ **Mostly done in Phase 3.** `.github/workflows/ci.yml`: tests, eval gate, a simple secret pattern scan, artifacts. Lint (ruff) is still to add.
 - **D-2** Container plus deploy (Cloud Run, Fly.io or Vercel functions for the API, with a Postgres checkpointer).
 - **D-3** Model serving decision: a hosted API vs vLLM on a rented GPU, decided on E-3 results and cost from O-1.
 - **G-1** Governance registry: tools, data classes, owners and policy versions (local table; UC only if on Databricks).

@@ -1,4 +1,4 @@
-# LOG_ON: Phase 1 (Safe Orchestrator) + Phase 2 (Grounded Memory)
+# LOG_ON: Phase 1 (Safe Orchestrator) + Phase 2 (Grounded Memory) + Phase 3 (Autonomous Loop & Telemetry)
 
 A working, offline, fully tested agent pipeline that implements the first half of the LOG_ON
 architecture with real libraries:
@@ -53,12 +53,46 @@ Questions it answers (see `docs/demo_output_phase2.txt`):
 - *What is the group exposure of Zuma Cement Plc and its subsidiaries?*, *Who supplies Eko Pharma?*, *Where are the suppliers for Delta Agro Exports located?*
 - Memory: *Remember that my focus customer is Eko Pharma Distribution Ltd* and then, in a **new session**, *Which suppliers serve my focus customer?*. Also *From now on keep answers brief* and *What did I ask before?*
 
+## Phase 3: Autonomous Loop & Telemetry
+
+The agent now checks its own work, retries with a revised plan, stops within a budget, escalates to a human when
+it can't succeed, and every step is traced. A 50-case trajectory eval suite gates every push in CI.
+
+```
+... permission → [approval ⏸] → action (MCP) → validation → verification ─passed / guard-blocked──→ (memory_update) → audit
+                                                                  ├─failed, attempt < limit → replan ─new plan─→ permission …
+                                                                  └─failed, limit reached ──→ escalation ⏸ ─accept / abort→ audit
+                                                                                                         └─retry + revised goal → policy
+any edge into planning / replan / approval / action / verification ──over budget──→ budget_stop → audit
+```
+
+| Layer | Implementation | File |
+|---|---|---|
+| Verification | `RuleVerifier` (tool errors, "couldn't answer" signals, goal checks: every number used, requested send delivered, requested id returned). `LLMVerifier` adds an OpenAI-compatible judge when `LOG_ON_LLM_API_KEY` is set; rules stay authoritative and it falls back on error | `log_on/loop/verifier.py`, `log_on/signals.py` |
+| Revision | `RuleReviser` (normalise `1,250` / `x` / `^`, fuzzy report names, graph template miss → `entity_lookup` / `find_path`) or `PlannerReviser` (re-asks the LLM planner with the verifier's feedback). Never adds an approval-gated tool, never repeats a tried plan | `log_on/loop/reviser.py` |
+| Loop + escalation | `verification` → `replan` (≤ `max_attempts`, default 3) → `escalation` node with `interrupt()`; human answers accept / abort / retry with a revised goal (re-checked by the input policy). Revised plans with side effects are approved again. Guardrail blocks are never retried. Every attempt is in state (`attempts`) and the audit log | `log_on/graph.py` |
+| Fail-fast | A step whose args use `{{steps[N].output}}` is skipped if step N failed, so an error message is never emailed | `log_on/mcp_client.py` |
+| Budgets + cost | Per-run ledger (`usage`: steps, LLM tokens from the API or estimated, tool calls, context tokens, est. USD) on every audit record and span. `Budget` (steps 40, tool calls 10, tokens 20k, $0.05; env overrides) is checked before every costly node, counting the tool calls a plan is about to make | `log_on/telemetry/cost.py` |
+| Tracing | OpenTelemetry, private `TracerProvider`: `run.*` root span per invocation, `node.*` span per node, `tool.*` span per MCP call (client-measured), `route` events. JSONL by default (`runs/traces.jsonl`), plus `console`, `otlp` (Jaeger / Tempo / Phoenix / collector) or `langfuse` (self-hosted, OTLP endpoint). All string attributes are PII-redacted | `log_on/telemetry/tracing.py` |
+| Replay | `python -m log_on.trace --list` and `python -m log_on.trace <run_id>`: span tree, decisions, latency by node and tool | `log_on/telemetry/replay.py` |
+| Trajectory evals | Grader scores tool selection (F1), step order (LCS), policy compliance (status, rules, **no PII in output / outbox / audit / traces / memory DB**), approval correctness, output, efficiency. 50 cases: 14 normal, 18 edge, 18 attack (prompt injection, PII exfiltration, tool misuse) | `log_on/evals/`, `evals/cases.yaml` |
+| CI gate | GitHub Actions: install, pytest, eval suite; fails below `evals/thresholds.json` (score ≥ 0.95, pass rate ≥ 0.95, attack pass rate 1.0, 0 PII leaks) | `.github/workflows/ci.yml` |
+
+Current numbers: **103 tests** (97 pass, 6 Neo4j tests skip without a server). **Eval suite: 50/50 cases pass, overall 1.0,
+attack pass rate 1.0, 0 PII leaks** with the rule-based planner (see the honest caveat under limitations).
+
 ## Run it
 
 ```bash
 cd log_on
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # or python -m venv + pip
-.venv/bin/python -m pytest -v                    # 64 tests (26 Phase 1 + 38 Phase 2; 6 need Neo4j, else skipped)
+.venv/bin/python -m pytest -v                    # 103 tests (26 Phase 1 + 38 Phase 2 + 39 Phase 3; 6 need Neo4j, else skipped)
+.venv/bin/python -m log_on.evals                 # Phase 3 trajectory eval suite + threshold gate (exit 1 on failure)
+.venv/bin/python -m log_on.demo --phase3         # Phase 3 walkthrough (loop, escalation, re-approval, budget, trace replay, evals)
+.venv/bin/python -m log_on "What is 2^10 + 5"    # verifier catches 10+5, reviser retries with 2**10 + 5
+.venv/bin/python -m log_on "Look up customer C-9999"            # escalates; then:
+.venv/bin/python -m log_on --resume <run_id> --retry-goal "Look up customer C-1002"   # or --accept / --abort
+.venv/bin/python -m log_on.trace --list          # runs from runs/traces.jsonl; then: python -m log_on.trace <run_id>
 .venv/bin/python -m log_on.demo --phase2         # Phase 2 walkthrough (ingest → graph QA → memory)
 .venv/bin/python -m log_on.ingest samples/lagoon_freight_portfolio_fy2026.pdf   # builds runs/graph.kuzu + runs/chunks.json
 .venv/bin/python -m log_on "Which suppliers serve customers whose contracts expire in Q1?"
@@ -85,15 +119,23 @@ Environment variables:
 | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | Neo4j connection (env only; forwarded to the MCP server process, never written to disk) |
 | `LOG_ON_EMBEDDINGS` | `fastembed` (default; ~67 MB model cached in `~/.cache/fastembed`) or `hash` (offline, no download) |
 | `LOG_ON_AS_OF` | pin "today" (ISO date) so quarter questions are reproducible |
+| `LOG_ON_MAX_ATTEMPTS` | Phase 3 attempts before escalating to a human (default 3) |
+| `LOG_ON_MAX_STEPS`, `LOG_ON_MAX_TOOL_CALLS`, `LOG_ON_MAX_TOKENS`, `LOG_ON_MAX_COST_USD` | per-run budget (defaults 40, 10, 20000, 0.05) |
+| `LOG_ON_PRICE_IN`, `LOG_ON_PRICE_OUT` | override the USD-per-1M-token price estimate |
+| `LOG_ON_TRACE_EXPORTERS` | comma list: `jsonl` (default), `console`, `otlp`, `langfuse`, `none` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP target for `otlp` (e.g. `http://localhost:4318` for Jaeger / a collector, Phoenix on 6006) |
+| `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | self-hosted Langfuse for `langfuse` (sent to `<host>/api/public/otel/v1/traces`) |
 
 Neo4j (optional): `docker run -p7474:7474 -p7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`, or without Docker
 download the Neo4j 5 community tarball plus a Java 21 JRE, run `bin/neo4j-admin dbms set-initial-password <password>`, then `bin/neo4j start`.
 Then run with `LOG_ON_GRAPH_BACKEND=neo4j NEO4J_PASSWORD=<password>`. The test suite runs the QA tests on both backends
 whenever `NEO4J_PASSWORD` is set and the server is reachable.
 
-Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`).
+Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/phase3_study_notes.md`: Loop Engineering, Automated Testing for LLMOps, Evaluating & Debugging GenAI and Evaluating AI Agents mapped to code, 3 exercises each.
+- `docs/demo_output_phase3.txt`, `docs/eval_report_phase3.txt`, `docs/test_results_phase3.txt`: captured Phase 3 runs.
 - `docs/phase2_study_notes.md`: concepts from the Knowledge Graph, Long-Term Memory and Document AI courses mapped to code, with 3 exercises each.
 - `docs/demo_output_phase2.txt`, `docs/test_results_phase2.txt`: captured Phase 2 runs.
 - `docs/phase1_study_notes.md` — what the LangGraph, Guardrails and MCP courses teach, where each concept is in this code, exercises.
@@ -103,6 +145,16 @@ Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" repor
 
 ## Known limitations (honest list)
 
+Phase 3:
+- **The 1.0 eval score is self-graded.** The 50 cases were written alongside the rule planner and verifier they test, so the score mainly shows the code and the cases agree. It is a regression net, not evidence of general quality. Independent cases and a real LLM run (study notes, Evaluating AI Agents exercises 1 and 3) are the next step.
+- **The rule verifier is narrow.** It understands calculator, report, CRM, send and graph results. Other answers pass on "no error signal, non-empty output". Error detection is regex based (`signals.py`), so a tool that fails in an unusual wording slips through.
+- **The rule reviser knows a handful of repairs.** Anything else escalates to a human, which is safe but not autonomous.
+- **The LLM verifier and LLM reviser have only been tested with a fake model** (no API key here). Their token/cost accounting uses the API's `usage` when present, else a chars/4 estimate; the price table is an estimate, not billing.
+- **Budgets are per run**, not per user or per day. Steps are counted per node execution.
+- **Tracing exporters**: JSONL and console are tested; OTLP and Langfuse exporters are configured and constructed in tests but have not been run against a live Jaeger/Phoenix/Langfuse server here.
+- **CI**: the workflow runs the same commands that pass in a fresh local Python 3.13 venv, but see the repo's latest Actions run for its real status.
+- The most visible latency (≈1–2 s per action) is spawning the stdio MCP server, as the traces show. The tool calls themselves take milliseconds.
+
 Phase 2:
 - **Extraction is tuned to the sample document's shape.** Tables are recognised by header keywords and prose relations by a few cue phrases. A differently worded report needs new mappings, or the LLM extractor, which has only been tested with a fake model (no API key here).
 - **QA covers the question types it has templates for.** Anything else gets a clear "couldn't map" message rather than a guess. Text-to-Cypher via the LLM planner is possible (raw read-only Cypher is accepted) but untested against a real model.
@@ -110,7 +162,7 @@ Phase 2:
 - **Only born-digital PDFs with ruled tables have been tested.** There is no OCR for scanned pages, and borderless tables or charts are not extracted.
 - **Entity linking and lookup load all node names into Python**, which is fine for hundreds or thousands of entities but not for millions (use a full-text index then).
 - **Kuzu upstream was archived (Oct 2025).** 0.11.3 works and is pinned. Forks (LadybugDB, Vela) continue it, and Neo4j is the supported alternative behind the same interface.
-- **The redactor is still regex-based** (Phase 1 limitation), so memory and graph PII protection inherit its false negatives. Person *names* are not treated as PII. The LangGraph checkpointer (`runs/checkpoints.sqlite` in the CLI) stores the raw goal for pause/resume. Phase 3 should encrypt or scrub it.
+- **The redactor is still regex-based** (Phase 1 limitation), so memory and graph PII protection inherit its false negatives. Person *names* are not treated as PII. The LangGraph checkpointer (`runs/checkpoints.sqlite` in the CLI) stores the raw goal for pause/resume. Still open after Phase 3 (roadmap M-4 / S-3).
 
 Phase 1:
 - The rule-based planner only understands the demo intents (calculate, look up customer, fetch/send report). It is a stand-in for an LLM, not a general planner. The LLM planner path has not been run against a real model (there's no API key here). Only its fallback and parser are tested.
