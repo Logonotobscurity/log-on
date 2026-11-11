@@ -51,7 +51,7 @@ single-customer requests the output redactor still masks the values; the bulk on
 | Run | vulnerable | contained bypasses | defended |
 |---|---:|---:|---:|
 | **Before**: Phase-4 defences (commit 90282be) vs the grown set, rule planner | **3** | **125** | 404 |
-| **Before**: same, live Qwen2.5-1.5B planner (llama.cpp); partial run, first ~310 of 532 attacks before its 25-min time limit | **≥4** | ≥55 | rest |
+| **Before**: same, live Qwen2.5-1.5B planner (llama.cpp); partial run: stopped by its 25-min time limit after ~420 of 532 attacks | **≥4** | ≥120 | rest |
 | After, rule planner, regex-only (CI mode; frozen as regression cases) | 0 | 0 | 532 |
 | After, rule planner, combined (default) | 0 | 0 | 532 |
 | **After, live Qwen2.5-1.5B planner, combined** | **0** | **0** | **532** |
