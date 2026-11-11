@@ -6,6 +6,11 @@
 
 Phase 2 (default): long-term memory in runs/memory.sqlite and, if `python -m log_on.ingest <pdf>` has been
 run, the knowledge graph at runs/graph.kuzu (or Neo4j with LOG_ON_GRAPH_BACKEND=neo4j). --phase1 disables both.
+
+Phase 3 (default): self-checking loop + budgets + tracing (runs/traces.jsonl). --no-loop disables the loop.
+A run that cannot be verified pauses for a human:
+  python -m log_on --resume <run_id> --accept | --abort | --retry-goal "Look up customer C-1002"
+Inspect any run's trace with:  python -m log_on.trace <run_id>   (or --list)
 """
 from __future__ import annotations
 
@@ -27,10 +32,15 @@ def main() -> None:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--approve", action="store_true")
     g.add_argument("--deny", action="store_true")
+    g.add_argument("--accept", action="store_true", help="escalation: accept the unverified result")
+    g.add_argument("--abort", action="store_true", help="escalation: stop the run")
+    g.add_argument("--retry-goal", metavar="GOAL", help="escalation: retry once with a revised goal")
     ap.add_argument("--auto-approve", action="store_true", help="approve any pause immediately (testing only)")
     ap.add_argument("--runs-dir", default="runs")
     ap.add_argument("--user", default="rhonda", help="memory namespace (Phase 2)")
     ap.add_argument("--phase1", action="store_true", help="disable Phase 2 memory + knowledge graph")
+    ap.add_argument("--no-loop", action="store_true", help="disable the Phase 3 verify/retry/escalate loop")
+    ap.add_argument("--max-attempts", type=int, help="Phase 3: attempts before escalating (default 3)")
     a = ap.parse_args()
 
     runs = Path(a.runs_dir); runs.mkdir(parents=True, exist_ok=True)
@@ -45,13 +55,19 @@ def main() -> None:
             extra["graph_backend"] = "neo4j"
         elif graph.exists():
             extra["graph_path"] = graph
+    if not a.no_loop:
+        from .loop import LoopConfig
+        extra["loop"] = LoopConfig.from_env(**({"max_attempts": a.max_attempts} if a.max_attempts else {}))
     orch = Orchestrator(audit_path=runs / "audit.jsonl", outbox=runs / "outbox.jsonl", checkpointer=SqliteSaver(conn),
                         **extra)
 
     if a.resume:
-        if not (a.approve or a.deny):
-            ap.error("--resume needs --approve or --deny")
-        res = orch.resume(a.resume, approved=a.approve)
+        if a.accept or a.abort or a.retry_goal:
+            res = orch.respond(a.resume, "accept" if a.accept else "abort" if a.abort else "retry", goal=a.retry_goal)
+        elif a.approve or a.deny:
+            res = orch.resume(a.resume, approved=a.approve)
+        else:
+            ap.error("--resume needs --approve/--deny (approval) or --accept/--abort/--retry-goal (escalation)")
     elif a.goal:
         res = orch.start(a.goal, user=a.user)
         if res["status"] == "awaiting_approval" and a.auto_approve:
@@ -62,6 +78,10 @@ def main() -> None:
     show("", res)
     if res["status"] == "awaiting_approval":
         print(f"\nApprove with: python -m log_on --resume {res['run_id']} --approve   (or --deny)")
+    if res["status"] == "awaiting_human":
+        print(f"\nEscalated. Answer with: python -m log_on --resume {res['run_id']} --accept | --abort | "
+              f"--retry-goal \"...\"")
+    print(f"trace: python -m log_on.trace {res['run_id']} --file {runs / 'traces.jsonl'}")
 
 
 if __name__ == "__main__":

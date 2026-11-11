@@ -12,6 +12,14 @@ after output validation, so only guard-checked content is ever stored:
     policy -> memory_retrieval -> knowledge_retrieval -> planning -> ... -> validation -> memory_update -> audit
               planning --memory intent (remember / from now on / recall)--> validation -> memory_update
               approval --denied--> memory_update (procedural lesson) -> audit
+
+Phase 3 (when `loop=` is given): a self-checking loop after output validation, run budgets on every
+costly transition, and OpenTelemetry tracing of every node (tracing is on in all phases):
+    validation -> verification --passed / guardrail-blocked--> (memory_update) -> audit
+                              \--failed, attempt < limit--> replan --new plan--> permission -> [approval] -> action ...
+                              \--failed, limit reached---> escalation (interrupt) --accept/abort--> (memory_update) -> audit
+                                                         replan --no safe repair--/            \--retry + revised goal--> policy
+    any router about to enter planning / replan / approval / action / verification --over budget--> budget_stop -> audit
 """
 from __future__ import annotations
 
@@ -35,6 +43,12 @@ from .guards import Guard, make_guard, redact_text
 from .mcp_client import call_tools
 from .planner import SELF_REF_RE, Planner, get_planner
 from .state import AgentState
+from .telemetry.cost import add_usage, est_tokens
+from .telemetry.tracing import RunTracer
+
+# Phase 3: transitions into these nodes spend tokens, tool calls or a human's attention -> budget-checked.
+COSTLY = {"planning", "replan", "approval", "action", "verification"}
+INTERRUPT_REASON = {"approval": "human approval required", "escalation": "escalated to a human: result not verified"}
 
 STOPWORDS = {"which", "what", "that", "with", "from", "their", "this", "about", "does", "have", "whose", "they",
              "them", "there", "where", "when", "will", "would", "should", "could", "please", "tell", "show"}
@@ -55,7 +69,11 @@ class Orchestrator:
     def __init__(self, planner: Planner | None = None, guard: Guard | None = None,
                  audit_path: str | os.PathLike = "runs/audit.jsonl", outbox: str | os.PathLike = "runs/outbox.jsonl",
                  checkpointer=None, tool_caller: Callable[..., dict[str, Any]] = call_tools,
-                 memory=None, graph_path: str | os.PathLike | None = None, graph_backend: str | None = None):
+                 memory=None, graph_path: str | os.PathLike | None = None, graph_backend: str | None = None,
+                 loop=None, tracer: RunTracer | bool | None = None, trace_path: str | os.PathLike | None = None):
+        """`loop`: Phase 3 LoopConfig (or True for defaults from env). `tracer`: a RunTracer, False to disable,
+        or None for the default (JSONL next to the audit log, plus exporters from LOG_ON_TRACE_EXPORTERS)."""
+        from .loop import LoopConfig, get_reviser, get_verifier
         self.memory = memory  # MemoryManager | None (Phase 2 long-term memory)
         self.graph_backend = graph_backend
         self.graph_path = str(Path(graph_path).resolve()) if graph_path else None
@@ -66,28 +84,91 @@ class Orchestrator:
         self.outbox = str(Path(outbox).resolve())
         self.tool_caller = tool_caller
         self.checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+        # Phase 3
+        self.loop = LoopConfig.from_env() if loop is True else (loop or None)
+        if self.loop is not None:
+            self.budget = self.loop.budget
+            self.verifier = self.loop.verifier or get_verifier()
+            self.reviser = self.loop.reviser or get_reviser(self.planner)
+        if tracer is False:
+            self.tracer = RunTracer(None, exporters=[], redact=redact_text)
+        elif isinstance(tracer, RunTracer):
+            self.tracer = tracer
+        else:
+            self.tracer = RunTracer(trace_path or Path(audit_path).parent / "traces.jsonl", redact=redact_text)
         self.graph = self._build()
 
-    # --- audit decorator: one record per node execution (+ interrupts) ------------------------------
+    # --- audit + trace + cost decorator: one audit record and one span per node execution -------------
     def _audited(self, name: str, fn: Callable[[AgentState], dict]) -> Callable[[AgentState], dict]:
         @functools.wraps(fn)
         def wrapper(state: AgentState) -> dict:
-            try:
-                delta = fn(state)
-            except GraphInterrupt:
-                self.audit.record(state.get("run_id", "?"), name, "interrupted",
-                                  {"reason": "human approval required", "plan": state.get("plan")})
-                raise
-            self.audit.record(state.get("run_id", "?"), name, "completed", delta)
+            run_id = state.get("run_id", "?")
+            with self.tracer.node_span(name, run_id, attempt=state.get("attempt"), status_in=state.get("status")) as span:
+                try:
+                    delta = dict(fn(state))
+                except GraphInterrupt:
+                    self.tracer.set(span, event="interrupted")
+                    self.audit.record(run_id, name, "interrupted",
+                                      {"reason": INTERRUPT_REASON.get(name, "interrupted"), "plan": state.get("plan"),
+                                       "attempt": state.get("attempt")})
+                    raise
+                delta["usage"] = self._usage(name, state, delta)
+                self._trace_node(span, name, delta)
+            self.audit.record(run_id, name, "completed", delta)
             return delta
         return wrapper
+
+    def _usage(self, name: str, state: AgentState, delta: dict) -> dict:
+        """Phase 3 cost ledger: steps, LLM tokens (reported or estimated), tool calls and context tokens."""
+        base = None if name == "intake" else state.get("usage")
+        llm, tool_calls, ctx = None, 0, 0
+        src = {"planning": self.planner, "replan": getattr(self, "reviser", None),
+               "verification": getattr(self, "verifier", None)}.get(name)
+        if src is not None and getattr(src, "last_usage", None):
+            llm, src.last_usage = src.last_usage, None
+        if name == "intake":
+            ctx = est_tokens(delta.get("goal", ""))
+        if name == "action":
+            tool_calls = len(delta.get("tool_results", []))
+            ctx = sum(est_tokens(r.get("output")) for r in delta.get("tool_results", []))
+        return add_usage(base, steps=1, llm=llm, tool_calls=tool_calls, context_tokens=ctx)
+
+    def _trace_node(self, span, name: str, d: dict) -> None:
+        t = self.tracer
+        u = d.get("usage") or {}
+        t.set(span, status=d.get("status"), **{"usage.total_tokens": u.get("total_tokens"),
+                                                "usage.est_cost_usd": u.get("est_cost_usd"), "usage.steps": u.get("steps")})
+        if "policy" in d and name == "policy":
+            t.set(span, **{"decision.allowed": d["policy"]["allowed"], "decision.rule_ids": d["policy"]["rule_ids"]})
+        if name in ("planning", "replan") and d.get("plan") is not None:
+            t.set(span, planner=d.get("planner"), **{"plan.tools": [x.get("tool", "") for x in d.get("plan") or []],
+                                                     "plan.steps": len(d.get("plan") or [])})
+        if name == "permission":
+            p = d.get("permission") or {}
+            t.set(span, **{"decision.needs_approval": p.get("needs_approval"), "decision.denied_tools": p.get("denied_tools")})
+        if name == "approval" and d.get("approval"):
+            t.set(span, **{"decision.approved": d["approval"]["approved"], "decision.approver": d["approval"]["approver"]})
+        if name == "validation":
+            t.set(span, **{"guard.violations": [v["validator"] for v in d.get("violations", [])]})
+        if name == "verification" and d.get("verification"):
+            v = d["verification"]
+            t.set(span, **{"verify.passed": str(v.get("passed")), "verify.score": v.get("score"),
+                           "verify.verifier": v.get("verifier"), "verify.reasons": v.get("reasons") or []})
+        if name == "escalation" and d.get("escalation"):
+            t.set(span, **{"decision.escalation": d["escalation"]["decision"]})
+        if name == "budget_stop":
+            t.set(span, **{"budget.exceeded": (d.get("budget") or {}).get("exceeded", [])})
 
     # --- nodes -------------------------------------------------------------------------------------
     def intake(self, state: AgentState) -> dict:
         goal = " ".join((state.get("goal") or "").split())  # normalise whitespace
-        return {"goal": goal, "run_id": state.get("run_id") or uuid.uuid4().hex[:12],
-                "user": state.get("user", "anonymous"), "status": "running",
-                "tool_results": [], "validated_results": [], "violations": []}
+        out = {"goal": goal, "run_id": state.get("run_id") or uuid.uuid4().hex[:12],
+               "user": state.get("user", "anonymous"), "status": "running",
+               "tool_results": [], "validated_results": [], "violations": []}
+        if self.loop is not None:
+            out.update(attempt=1, attempt_limit=self.loop.max_attempts, attempts=[], tried_plans=[],
+                       budget=self.budget.as_dict())
+        return out
 
     def policy_check(self, state: AgentState) -> dict:
         decision = policy.check_input(state["goal"])
@@ -164,17 +245,19 @@ class Orchestrator:
         return {"plan": [], "planner": "memory", "status": "running",
                 "tool_results": [{"tool": "memory", "args": {"intent": intent["kind"]}, "ok": True, "output": msg}]}
 
+    @staticmethod
+    def _context(state: AgentState) -> dict:
+        kn = state.get("knowledge") or {}
+        mem = state.get("memory") or {}
+        return {"entities": kn.get("entities", []), "graph_available": kn.get("available", False),
+                "memories": [m["text"] for m in mem.get("semantic", [])], "instructions": mem.get("procedural", {})}
+
     def planning(self, state: AgentState) -> dict:
         intent = (state.get("memory") or {}).get("intent")
         if self.memory is not None and intent:
             return self._memory_op(state, intent)
         if (self.memory is not None or self.knowledge_enabled) and _accepts_context(self.planner):
-            kn = state.get("knowledge") or {}
-            mem = state.get("memory") or {}
-            context = {"entities": kn.get("entities", []), "graph_available": kn.get("available", False),
-                       "memories": [m["text"] for m in mem.get("semantic", [])],
-                       "instructions": mem.get("procedural", {})}
-            steps = self.planner.plan(state["goal"], context)
+            steps = self.planner.plan(state["goal"], self._context(state))
         else:
             steps = self.planner.plan(state["goal"])
         out: dict[str, Any] = {"plan": steps, "planner": getattr(self.planner, "name", "custom")}
@@ -222,6 +305,12 @@ class Orchestrator:
         calls = [(s["tool"], s.get("args", {})) for s in state["plan"]]
         kwargs = {"extra_env": self._graph_env()} if self.knowledge_enabled else {}
         res = self.tool_caller(calls, outbox=self.outbox, egress_filter=redact_text, **kwargs)
+        for r in res["results"]:
+            out = str(r.get("output") or "")
+            self.tracer.tool_span(r.get("tool", "?"), state.get("run_id", "?"), r.pop("started_ns", None),
+                                  r.pop("ended_ns", None), ok=bool(r.get("ok", True)),
+                                  args=json.dumps(r.get("args", {}), default=str), output_chars=len(out),
+                                  output_tokens_est=est_tokens(out), output_preview=out[:200])
         mismatches = permissions.annotation_mismatches(res.get("tools", {}))
         return {"tool_results": res["results"], "permission": {**state["permission"], "annotation_mismatches": mismatches}}
 
@@ -281,6 +370,84 @@ class Orchestrator:
         writes.append({"namespace": "episodic", "key": ep["key"], "text": ep["text"]})
         return {"memory_writes": writes}
 
+    # --- Phase 3: self-checking loop -----------------------------------------------------------------
+    def verification(self, state: AgentState) -> dict:
+        from .loop import plan_key
+        attempt = state.get("attempt", 1)
+        if state.get("status") == "blocked":
+            verdict = {"verifier": "skipped", "passed": None, "score": None, "checks": [],
+                       "reasons": ["guardrail block is final and is never retried"]}
+        elif state.get("planner") == "memory":
+            verdict = {"verifier": "skipped", "passed": True, "score": 1.0, "checks": [], "reasons": []}
+        else:
+            verdict = self.verifier.verify(state["goal"], state.get("plan", []), state.get("tool_results", []),
+                                           state.get("validated_results", []))
+        record = {"attempt": attempt, "planner": state.get("planner"),
+                  "plan": [{"tool": x.get("tool"), "args": x.get("args", {})} for x in state.get("plan", [])],
+                  "results": [{"tool": v["tool"], "output": redact_text(v["output"])[:160]}
+                              for v in state.get("validated_results", [])],
+                  "verdict": {k: verdict.get(k) for k in ("verifier", "passed", "score", "reasons")}}
+        out: dict[str, Any] = {"verification": {**verdict, "attempt": attempt},
+                               "attempts": [*state.get("attempts", []), record],
+                               "tried_plans": [*state.get("tried_plans", []), plan_key(state.get("plan", []))]}
+        if verdict["passed"] is False:
+            out["status"] = "unverified"
+        return out
+
+    def replan(self, state: AgentState) -> dict:
+        verdict = state.get("verification") or {}
+        new, notes = self.reviser.revise(state["goal"], state.get("plan", []), verdict, state.get("tool_results", []),
+                                         self._context(state), state.get("tried_plans", []))
+        out: dict[str, Any] = {"revision": {"reviser": getattr(self.reviser, "name", "custom"), "notes": notes,
+                                            "proposed": bool(new)}}
+        if new:
+            out.update(plan=new, planner=f"{getattr(self.reviser, 'name', 'custom')} reviser", status="running",
+                       attempt=state.get("attempt", 1) + 1, tool_results=[], validated_results=[], violations=[])
+        return out
+
+    def escalation(self, state: AgentState) -> dict:
+        attempt = state.get("attempt", 1)
+        reasons = (state.get("verification") or {}).get("reasons", [])
+        payload = {"question": f"I could not verify the result after {attempt} attempt(s). "
+                               "Accept it, retry with a revised goal, or abort?",
+                   "run_id": state["run_id"], "goal": state["goal"], "reasons": reasons,
+                   "options": ["accept", "retry", "abort"],
+                   "attempts": [{"attempt": a["attempt"], "tools": [p["tool"] for p in a["plan"]],
+                                 "passed": a["verdict"]["passed"], "reasons": a["verdict"]["reasons"]}
+                                for a in state.get("attempts", [])],
+                   "last_output": state.get("final_output", "")}
+        if (state.get("revision") or {}).get("notes"):
+            payload["reviser_notes"] = state["revision"]["notes"]
+        raw = interrupt(payload)
+        if isinstance(raw, bool):
+            raw = {"decision": "accept" if raw else "abort"}
+        elif isinstance(raw, str):
+            raw = {"decision": raw}
+        choice = raw.get("decision") if raw.get("decision") in ("accept", "retry", "abort") else "abort"
+        dec = {"decision": choice, "by": raw.get("by", raw.get("approver", "unknown")), "note": raw.get("note", "")}
+        out: dict[str, Any] = {"escalation": dec}
+        if choice == "accept":
+            out.update(status="completed",
+                       final_output="[accepted by a human without passing verification]\n" + state.get("final_output", ""))
+        elif choice == "abort":
+            last = state.get("final_output", "")
+            out.update(status="escalated", final_output=(
+                f"Stopped after {attempt} attempt(s): the result could not be verified "
+                f"({'; '.join(reasons[:3]) or 'no safe revision'}). Escalated to a human, who aborted."
+                + (f"\nLast unverified result:\n{last}" if last else "")))
+        else:
+            goal = " ".join((raw.get("goal") or state["goal"]).split())
+            dec["goal"] = goal
+            out.update(goal=goal, status="running", attempt=attempt + 1, attempt_limit=attempt + 1, plan=[],
+                       tool_results=[], validated_results=[], violations=[])
+        return out
+
+    def budget_stop(self, state: AgentState) -> dict:
+        usage = state.get("usage")
+        why = self.budget.exceeded(usage) or self.budget.exceeded(usage, len(state.get("plan") or []))
+        return {"status": "budget_exceeded", "budget": {**self.budget.as_dict(), "exceeded": why},
+                "final_output": f"Stopped: run budget exceeded ({'; '.join(why)}). Nothing further was executed."}
+
     def finalize(self, state: AgentState) -> dict:
         return {"status": state.get("status", "completed")}
 
@@ -310,55 +477,127 @@ class Orchestrator:
             return "action"
         return "memory_update" if self.memory is not None else "audit"
 
+    def _after_verification(self, state: AgentState) -> str:
+        done = "memory_update" if self.memory is not None else "audit"
+        if (state.get("verification") or {}).get("passed") is not False:
+            return done
+        return "replan" if state.get("attempt", 1) < state.get("attempt_limit", self.loop.max_attempts) else "escalation"
+
+    @staticmethod
+    def _after_replan(state: AgentState) -> str:
+        return "permission" if state.get("status") == "running" else "escalation"
+
+    def _after_escalation(self, state: AgentState) -> str:
+        if state["escalation"]["decision"] == "retry":
+            return "policy"
+        return "memory_update" if self.memory is not None else "audit"
+
+    def _link(self, g: StateGraph, src: str, router: Callable | str, dests: list[str]) -> None:
+        """Every edge is a traced decision; with the loop on, edges into costly nodes are budget-checked."""
+        fixed = router if isinstance(router, str) else None
+        guarded = self.loop is not None and any(d in COSTLY for d in dests)
+
+        def route(state: AgentState) -> str:
+            nxt = fixed or router(state)
+            if guarded and nxt in COSTLY:
+                pending = len(state.get("plan") or []) if nxt in ("approval", "action") else 0
+                if self.budget.exceeded(state.get("usage"), pending):
+                    nxt = "budget_stop"
+            self.tracer.decision("route", **{"from": src, "to": nxt, "status": state.get("status")})
+            return nxt
+        route.__name__ = f"route_{src}"
+        g.add_conditional_edges(src, route, list(dict.fromkeys(dests + (["budget_stop"] if guarded else []))))
+
     def _build(self):
         g = StateGraph(AgentState)
         nodes = [("intake", self.intake), ("policy", self.policy_check), ("planning", self.planning),
                  ("permission", self.permission), ("approval", self.approval), ("action", self.action),
                  ("validation", self.validation), ("audit", self.finalize)]
-        mem, kg = self.memory is not None, self.knowledge_enabled
+        mem, kg, loop = self.memory is not None, self.knowledge_enabled, self.loop is not None
         if mem:
             nodes += [("memory_retrieval", self.memory_retrieval), ("memory_update", self.memory_update)]
         if kg:
             nodes += [("knowledge_retrieval", self.knowledge_retrieval)]
+        if loop:
+            nodes += [("verification", self.verification), ("replan", self.replan), ("escalation", self.escalation),
+                      ("budget_stop", self.budget_stop)]
         for name, fn in nodes:
             g.add_node(name, self._audited(name, fn))
+        done = "memory_update" if mem else "audit"
         g.add_edge(START, "intake")
-        g.add_edge("intake", "policy")
+        self._link(g, "intake", "policy", ["policy"])
         grounding = (["memory_retrieval"] if mem else []) + (["knowledge_retrieval"] if kg else [])
-        g.add_conditional_edges("policy", self._after_policy, [grounding[0] if grounding else "planning", "audit"])
+        self._link(g, "policy", self._after_policy, [grounding[0] if grounding else "planning", "audit"])
         for a, b in zip(grounding, grounding[1:] + ["planning"]):
-            g.add_edge(a, b)
+            self._link(g, a, b, [b])
         after_plan = ["permission", "audit"] + (["memory_update", "validation"] if mem else [])
-        g.add_conditional_edges("planning", self._after_planning, after_plan)
-        g.add_conditional_edges("permission", self._after_permission, ["approval", "action", "audit"])
-        g.add_conditional_edges("approval", self._after_approval, ["action", "memory_update" if mem else "audit"])
-        g.add_edge("action", "validation")
-        g.add_edge("validation", "memory_update" if mem else "audit")
+        self._link(g, "planning", self._after_planning, after_plan)
+        self._link(g, "permission", self._after_permission, ["approval", "action", "audit"])
+        self._link(g, "approval", self._after_approval, ["action", done])
+        self._link(g, "action", "validation", ["validation"])
+        if loop:
+            self._link(g, "validation", "verification", ["verification"])
+            self._link(g, "verification", self._after_verification, [done, "replan", "escalation"])
+            self._link(g, "replan", self._after_replan, ["permission", "escalation"])
+            self._link(g, "escalation", self._after_escalation, ["policy", done])
+            g.add_edge("budget_stop", "audit")
+        else:
+            self._link(g, "validation", done, [done])
         if mem:
             g.add_edge("memory_update", "audit")
         g.add_edge("audit", END)
         return g.compile(checkpointer=self.checkpointer)
 
     # --- convenience API ---------------------------------------------------------------------------
+    def _invoke(self, run_id: str, kind: str, payload, **attrs) -> dict:
+        cfg = {"configurable": {"thread_id": run_id}}
+        with self.tracer.run_span(run_id, kind, loop=self.loop is not None, memory=self.memory is not None,
+                                  knowledge=self.knowledge_enabled, **attrs) as span:
+            result = self.graph.invoke(payload, cfg)
+            out = self._summarise(run_id, result)
+            u = out.get("usage") or {}
+            self.tracer.set(span, status=out.get("status"), attempt=out.get("attempt"),
+                            **{"usage.total_tokens": u.get("total_tokens"), "usage.est_cost_usd": u.get("est_cost_usd"),
+                               "usage.steps": u.get("steps"), "usage.tool_calls": u.get("tool_calls")})
+        self.tracer.flush()
+        return out
+
     def start(self, goal: str, run_id: str | None = None, user: str = "rhonda") -> dict:
         run_id = run_id or uuid.uuid4().hex[:12]
-        cfg = {"configurable": {"thread_id": run_id}}
-        result = self.graph.invoke({"goal": goal, "run_id": run_id, "user": user}, cfg)
-        return self._summarise(run_id, result)
+        return self._invoke(run_id, "start", {"goal": goal, "run_id": run_id, "user": user}, goal=goal, user=user)
+
+    def pending_node(self, run_id: str) -> str | None:
+        nxt = self.graph.get_state({"configurable": {"thread_id": run_id}}).next
+        return nxt[0] if nxt else None
 
     def resume(self, run_id: str, approved: bool, approver: str = "rhonda", note: str = "") -> dict:
+        """Answer the pending human step. For an escalation, approved=True means accept and False means abort."""
         from langgraph.types import Command
-        cfg = {"configurable": {"thread_id": run_id}}
-        result = self.graph.invoke(Command(resume={"approved": approved, "approver": approver, "note": note}), cfg)
-        return self._summarise(run_id, result)
+        if self.pending_node(run_id) == "escalation":
+            return self.respond(run_id, "accept" if approved else "abort", by=approver, note=note)
+        return self._invoke(run_id, "resume", Command(resume={"approved": approved, "approver": approver, "note": note}),
+                            decision="approve" if approved else "deny")
+
+    def respond(self, run_id: str, decision: str, goal: str | None = None, by: str = "rhonda", note: str = "") -> dict:
+        """Answer an escalation: decision is 'accept', 'retry' (optionally with a revised goal) or 'abort'."""
+        from langgraph.types import Command
+        payload = {"decision": decision, "by": by, "note": note}
+        if goal:
+            payload["goal"] = goal
+        return self._invoke(run_id, "resume", Command(resume=payload), decision=decision)
 
     def _summarise(self, run_id: str, result: dict) -> dict:
         interrupts = result.get("__interrupt__")
         out = {k: v for k, v in result.items() if k != "__interrupt__"}
         out["run_id"] = run_id
         if interrupts:
-            out["status"] = "awaiting_approval"
-            out["pending_approval"] = interrupts[0].value
+            value = interrupts[0].value
+            if isinstance(value, dict) and "options" in value:
+                out["status"] = "awaiting_human"
+                out["pending_escalation"] = value
+            else:
+                out["status"] = "awaiting_approval"
+                out["pending_approval"] = value
         return out
 
 

@@ -33,6 +33,11 @@ GRAPH_TOPIC_RE = re.compile(r"\b(suppliers?|vendors?|contracts?|customers?|accou
 PATH_RE = re.compile(r"\b(path|connected|connection|linked|related|relationship)\b", re.I)
 ENTITY_Q_RE = re.compile(r"^\s*(who|what) (is|are)\b|\btell me about\b|\bprofile of\b|\blook ?up\b", re.I)
 SELF_REF_RE = re.compile(r"\b(my|our)\b", re.I)
+KNOWN_REPORTS = ("q3 revenue", "weekly ops")  # names the mock MCP server offers (used by the Phase 3 reviser)
+# Phase 3: any "<get|fetch|show|open|pull> the <name> report" falls through to get_report(name) as a last resort.
+# The verifier then catches "No report named ..." and the reviser repairs the name (fuzzy match), or escalates.
+GENERIC_REPORT_RE = re.compile(r"\b(?:get|fetch|show|open|pull)\b(?:\s+me)?\s+(?:the\s+|our\s+)?"
+                               r"([a-z0-9]+(?:\s+[a-z0-9]+)?)\s+report\b", re.I)
 
 
 def _graph_plan(goal: str, context: dict | None) -> list[PlanStep]:
@@ -91,6 +96,9 @@ class RuleBasedPlanner:
         m = MATH_RE.search(g)
         if m and re.search(r"\b(calc|calculate|compute|what is|what's|sum|total)\b|[-+*/]", g, re.I):
             return [{"tool": "calculator", "args": {"expression": m.group(0).strip()}, "reason": "arithmetic"}]
+        gen = GENERIC_REPORT_RE.search(g)
+        if gen:
+            return [{"tool": "get_report", "args": {"name": gen.group(1).lower()}, "reason": "fetch report (best guess)"}]
         return steps
 
 
@@ -120,6 +128,7 @@ class LLMPlanner:
         self.fallback = fallback or RuleBasedPlanner()
         self.timeout = timeout
         self.last_error: str | None = None
+        self.last_usage: dict | None = None  # Phase 3 cost ledger reads (and clears) this after planning
 
     def _complete(self, goal: str, context: dict | None = None) -> str:
         user = goal
@@ -134,7 +143,14 @@ class LLMPlanner:
                                      headers={"Authorization": f"Bearer {self.api_key}",
                                               "Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read())["choices"][0]["message"]["content"]
+            data = json.loads(resp.read())
+        content = data["choices"][0]["message"]["content"]
+        from .telemetry.cost import est_tokens
+        u = data.get("usage") or {}
+        self.last_usage = {"model": self.model, "calls": 1,
+                           "prompt_tokens": int(u.get("prompt_tokens") or est_tokens(SYSTEM_PROMPT + user)),
+                           "completion_tokens": int(u.get("completion_tokens") or est_tokens(content))}
+        return content
 
     @staticmethod
     def parse(raw: str) -> list[PlanStep]:
