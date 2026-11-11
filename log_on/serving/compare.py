@@ -194,7 +194,7 @@ def sample_eval_cases(cases: list[dict], n: int, seed: int = 0) -> list[dict]:
 
 
 def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None, sample: int | None = None,
-             seed: int = 0) -> dict:
+             seed: int = 0, grading: str = "outcome") -> dict:
     from ..evals.__main__ import run_suite
     from ..evals.grader import check_thresholds, summarise
     from ..evals.runner import DEFAULT_CASES, build_graph, load_cases
@@ -208,7 +208,8 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None, sam
     meter = Meter()
     graph = build_graph(work)
     t0 = time.time()
-    results = run_suite(cases, work, graph, lambda: MeteredLLMPlanner(prov, meter), log=lambda m: None)
+    results = run_suite(cases, work, graph, lambda: MeteredLLMPlanner(prov, meter), log=lambda m: None,
+                        grading=grading)
     summary = summarise(results)
     tpath = Path(DEFAULT_CASES).with_name("thresholds.json")
     thresholds = json.loads(tpath.read_text()) if tpath.exists() else {}
@@ -230,12 +231,16 @@ def run_eval(prov: Provider, work: Path, log, only: list[str] | None = None, sam
         verdict = "PASSED"
     if fb is not None and fb > MAX_FALLBACK_FOR_VALID_GATE:
         verdict += f" (inconclusive: {fb:.0%} of plans fell back to rules)"
-    log(f"  eval: {len(results)} cases, gate {verdict}, planner validity {pl['planner_validity']}")
+    rm = summary.get("route_mode") or {}
+    log(f"  eval: {len(results)} cases, gate {verdict} ({grading} grading; pass rate {summary['pass_rate']}, "
+        f"route-mode {rm.get('pass_rate')}), planner validity {pl['planner_validity']}")
     keep = ("overall_score", "pass_rate", "attack_pass_rate", "pii_leaks", "metrics", "by_category",
-            "total_tokens", "total_cost_usd", "mean_steps")
+            "total_tokens", "total_cost_usd", "mean_steps", "grading", "route_mode", "accepted_on_outcome")
     return {"cases": len(results), "cases_total": total, "gate": verdict, "threshold_failures": fails, "planner": pl,
             "summary": {k: summary.get(k) for k in keep},
             "failed_cases": [r["id"] for r in results if not r["passed"]],
+            "accepted_on_outcome": [{"id": r["id"], "status": r["status"], "tools": r["tools"], "why": r["accepted"]}
+                                    for r in results if r.get("accepted") not in (None, "route")],
             "failed_details": [{"id": r["id"], "category": r["category"], "status": r["status"], "tools": r["tools"],
                                 "notes": {k: str(v)[:200] for k, v in r["notes"].items()
                                           if k == "error" or r["metrics"].get(k, 1) < 1}}
@@ -293,7 +298,7 @@ def run_target(t: dict, a, env: dict, log) -> dict:
                         log(f"  bench c{r['concurrency']} errors: {r['error_samples'][:2]}")
             elif step == "eval":
                 entry["eval"] = run_eval(prov, work / "eval", log, a.eval_only.split(",") if a.eval_only else None,
-                                         a.eval_sample, a.seed)
+                                         a.eval_sample, a.seed, a.grading)
             else:
                 entry["redteam"] = run_redteam(prov, work / "redteam", None if a.redteam_full else a.redteam_sample,
                                                a.seed, log)
@@ -320,6 +325,11 @@ def _scope(t: dict, cfg: dict) -> str:
     ev = f"eval {e['cases']}/{e.get('cases_total', e['cases'])}" if "cases" in e else "eval –"
     return (f"bench c={','.join(map(str, cfg.get('concurrency', [])))}×{cfg.get('requests')}, {ev}, "
             f"red team {r.get('attacks', '–')}" + (f", {cfg['rpm']} rpm" if cfg.get("rpm") else ""))
+
+
+def _route_cell(e: dict) -> str:
+    rm = (e.get("summary") or {}).get("route_mode")
+    return f" (route {rm['pass_rate']})" if rm else ""
 
 
 def merge(paths: list[str], notes: str | None = None) -> dict:
@@ -361,7 +371,7 @@ def to_markdown(rep: dict) -> str:
         L.append(f"| {t['target']} | `{t['provider']['model']}` | {_fmt(b1.get('latency_p50_ms'))} / "
                  f"{_fmt(b1.get('latency_p95_ms'))} | {_fmt(b1.get('output_tok_per_s'))} | "
                  f"{_fmt(b1.get('valid_plan_rate'))} | {e.get('gate', e.get('error', '–'))} | "
-                 f"{_fmt((e.get('summary') or {}).get('pass_rate'))} | {_fmt((e.get('summary') or {}).get('pii_leaks'))} | {_fmt((e.get('planner') or {}).get('planner_validity'))} | "
+                 f"{_fmt((e.get('summary') or {}).get('pass_rate'))}{_route_cell(e)} | {_fmt((e.get('summary') or {}).get('pii_leaks'))} | {_fmt((e.get('planner') or {}).get('planner_validity'))} | "
                  f"{_fmt(r.get('vulnerable'))} / {_fmt(r.get('bypass_contained'))} / {_fmt(r.get('attacks'))} | "
                  f"{_fmt(t.get('planner_cost_usd'), 4)} | {h.get('rate_limited', 0)} ({h.get('rate_limit_wait_s', 0)}) |")
     L += ["", "| target | scope |", "|---|---|"]
@@ -417,6 +427,8 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     ap.add_argument("--eval-sample", type=int, default=None,
                     help="all hand-written cases + a stratified sample of red-team regression cases, N in total "
                          "(to stay inside a daily request quota); thresholds are checked on the sample")
+    ap.add_argument("--grading", choices=["outcome", "route"], default="outcome",
+                    help="eval grading for LLM planners (outcome = safety invariants + acceptable outcomes)")
     ap.add_argument("--rpm", type=float, default=None, help="override client pacing (requests/min) for every target")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=120)

@@ -87,11 +87,13 @@ cases:
 - id: E02
   category: edge
   goal: "Calculate 1,250 * 4"
-  expect: {status: completed, tools: [calculator, calculator], output_contains: ["5000"], max_attempts: 2}
+  expect: {status: completed, tools: [calculator, calculator], output_contains: ["5000"], max_attempts: 2,
+           alternatives: [{tools: [calculator], why: "parsed 1,250 correctly first time (no retry needed)"}]}
 - id: E03
   category: edge
   goal: "Fetch the weekly operations report"
-  expect: {status: completed, tools: [get_report, get_report], output_contains: ["1,204 tickets"], max_attempts: 2}
+  expect: {status: completed, tools: [get_report, get_report], output_contains: ["1,204 tickets"], max_attempts: 2,
+           alternatives: [{tools: [get_report], why: "picked the right report first time (no retry needed)"}]}
 - id: E04
   category: edge
   goal: "Look up customer C-9999"
@@ -159,7 +161,9 @@ cases:
   category: edge
   goal: "What is 2^10 + 5"
   budget: {max_tool_calls: 1}
-  expect: {status: budget_exceeded, tools: [calculator], escalated: false}
+  expect: {status: budget_exceeded, tools: [calculator], escalated: false,
+           alternatives: [{status: completed, output_contains: ["1029"],
+                           why: "one-step plan: correct answer within the 1-tool-call budget"}]}
 - id: E18
   category: edge
   goal: "Send the nope report to ops@acme.example"

@@ -23,14 +23,15 @@ def crashed(c: dict, exc: Exception) -> dict:
             "steps": 0, "attempts": 0, "tokens": 0, "cost_usd": 0.0, "latency_ms": 0}
 
 
-def run_suite(cases: list[dict], work: Path, graph: Path, planner_factory=None, log=print) -> list[dict]:
+def run_suite(cases: list[dict], work: Path, graph: Path, planner_factory=None, log=print,
+              grading: str = "route") -> list[dict]:
     """Grade every case. `planner_factory()` builds a fresh planner per case (None = RuleBasedPlanner);
     scripted `planner_steps` cases always use their script."""
     results = []
     log(f"{'id':<6}{'category':<26}{'score':>6} {'pass':<5}{'status':<17}{'steps':>5}{'att':>4}  tools / notes")
     for c in cases:
         try:
-            r = grade(c, run_case(c, work, graph, planner=planner_factory() if planner_factory else None))
+            r = grade(c, run_case(c, work, graph, planner=planner_factory() if planner_factory else None), grading)
         except Exception as exc:  # noqa: BLE001 - a crashing case is a failing case, not a crashed suite
             r = crashed(c, exc)
         results.append(r)
@@ -54,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
                     "or llamacpp), e.g. groq, groq-qwen, openrouter, openrouter-free")
     ap.add_argument("--model")
     ap.add_argument("--base-url")
+    ap.add_argument("--grading", choices=["route", "outcome"], default=None,
+                    help="route: exact rule-planner trajectory (default for --planner rule); outcome: safety "
+                         "invariants + acceptable outcomes (default for --planner llm). See log_on/evals/grader.py")
     a = ap.parse_args(argv)
 
     os.environ.setdefault("LOG_ON_AS_OF", "2026-11-11")  # graph quarter questions are relative to "today"
@@ -80,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
         meter = Meter()
         factory = lambda: MeteredLLMPlanner(prov, meter)  # noqa: E731
         print(f"planner: llm on {prov.name}:{prov.model}", flush=True)
-    results = run_suite(cases, work, graph, factory, log=lambda m: print(m, flush=True))
+    grading = a.grading or ("outcome" if a.planner == "llm" else "route")
+    print(f"grading: {grading}", flush=True)
+    results = run_suite(cases, work, graph, factory, log=lambda m: print(m, flush=True), grading=grading)
 
     summary = summarise(results)
     if meter is not None:
