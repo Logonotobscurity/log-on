@@ -11,11 +11,17 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-def server_params(outbox: str | None = None) -> StdioServerParameters:
-    env = {"PYTHONPATH": os.pathsep.join(filter(None, [os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+# Graph/as-of settings are forwarded to the server process; nothing else from the parent env leaks in.
+FORWARD_ENV_PREFIXES = ("LOG_ON_GRAPH_", "LOG_ON_AS_OF", "NEO4J_")
+
+
+def server_params(outbox: str | None = None, extra_env: dict[str, str] | None = None) -> StdioServerParameters:
+    env = {k: v for k, v in os.environ.items() if k.startswith(FORWARD_ENV_PREFIXES)}
+    env |= {"PYTHONPATH": os.pathsep.join(filter(None, [os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                                          os.environ.get("PYTHONPATH")]))}
     if outbox:
         env["LOG_ON_OUTBOX"] = outbox
+    env |= {k: str(v) for k, v in (extra_env or {}).items()}
     return StdioServerParameters(command=sys.executable, args=["-m", "log_on.mcp_server.business_server"], env=env)
 
 
@@ -40,8 +46,9 @@ def _resolve(args: dict, prior: list[dict]) -> dict:
 
 
 async def _acall(calls: list[tuple[str, dict]], outbox: str | None,
-                 egress_filter: Callable[[str], str] | None = None) -> dict[str, Any]:
-    async with stdio_client(server_params(outbox)) as streams:
+                 egress_filter: Callable[[str], str] | None = None,
+                 extra_env: dict[str, str] | None = None) -> dict[str, Any]:
+    async with stdio_client(server_params(outbox, extra_env)) as streams:
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
             listed = await session.list_tools()
@@ -63,10 +70,11 @@ async def _acall(calls: list[tuple[str, dict]], outbox: str | None,
 
 
 def call_tools(calls: list[tuple[str, dict]], outbox: str | None = None,
-               egress_filter: Callable[[str], str] | None = None) -> dict[str, Any]:
+               egress_filter: Callable[[str], str] | None = None,
+               extra_env: dict[str, str] | None = None) -> dict[str, Any]:
     """Synchronous wrapper so LangGraph sync nodes can use it."""
-    return asyncio.run(_acall(calls, outbox, egress_filter))
+    return asyncio.run(_acall(calls, outbox, egress_filter, extra_env))
 
 
-def list_tools(outbox: str | None = None) -> dict[str, Any]:
-    return asyncio.run(_acall([], outbox))["tools"]
+def list_tools(outbox: str | None = None, extra_env: dict[str, str] | None = None) -> dict[str, Any]:
+    return asyncio.run(_acall([], outbox, extra_env=extra_env))["tools"]

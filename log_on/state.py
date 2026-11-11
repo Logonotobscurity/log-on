@@ -25,3 +25,7 @@ class AgentState(TypedDict, total=False):
     violations: list[dict[str, Any]]
     guard_backend: str
     final_output: str
+    # Phase 2
+    memory: dict[str, Any]          # retrieved memories + detected memory intent
+    knowledge: dict[str, Any]       # linked graph entities (grounding for the planner)
+    memory_writes: list[dict[str, Any]]

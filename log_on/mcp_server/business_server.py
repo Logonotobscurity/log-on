@@ -15,7 +15,8 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from mcp_types import ToolAnnotations
 
-server = MCPServer("log_on-business-tools", instructions="Mock CRM + reporting tools for the LOG_ON safe orchestrator.")
+server = MCPServer("log_on-business-tools",
+                   instructions="Mock CRM + reporting tools and read-only knowledge-graph tools for the LOG_ON orchestrator.")
 
 # Mock CRM. Deliberately contains PII so the output guardrails have something to catch.
 CUSTOMERS = {
@@ -89,6 +90,65 @@ def calculator(expression: str) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"error: {exc}"
     return str(round(val, 10) if isinstance(val, float) else val)
+
+
+# --- Phase 2: read-only knowledge-graph tools ---------------------------------------------------------
+# The graph is opened read-only per call (Kuzu read_only=True / Neo4j READ routing) and raw Cypher is
+# screened by assert_read_only(), so these tools cannot modify the graph even if a planner asks them to.
+
+def _graph():
+    from log_on.kg.store import make_graph_store
+    return make_graph_store(read_only=True)
+
+
+def _as_of():
+    from datetime import date
+    v = os.environ.get("LOG_ON_AS_OF")
+    return date.fromisoformat(v) if v else None
+
+
+@server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+def graph_query(question: str = "", cypher: str = "", entity_ids: list[str] | None = None) -> str:
+    """Answer a multi-hop question over the business knowledge graph (customers, contracts, suppliers,
+    cities, people). Pass a natural-language `question` (routed to vetted Cypher templates) or a read-only
+    `cypher` query. `entity_ids` can pin entities resolved earlier (e.g. from memory). Returns text + sources."""
+    from log_on.kg import qa
+    try:
+        with _graph() as g:
+            return qa.answer(g, question, entity_ids or [], cypher, as_of=_as_of()).render()
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+@server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+def find_path(source: str, target: str, max_hops: int = 5) -> str:
+    """Shortest connection between two entities (names or ids) in the knowledge graph, with relationship types."""
+    from log_on.kg import qa
+    try:
+        with _graph() as g:
+            res = qa.path_between(g, source, target, max_hops)
+        if res.get("sources"):
+            res["text"] += "\nSources: " + "; ".join(f"p.{s['page']} {s['section']}" for s in res["sources"])
+        return res["text"]
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+@server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+def entity_lookup(name: str) -> str:
+    """Find an entity by name, alias or id (fuzzy) and summarise its properties, relationships and sources."""
+    from log_on.kg import qa
+    try:
+        with _graph() as g:
+            hits = qa.lookup(g, name)
+            if not hits:
+                return f"No entity matches {name!r}."
+            best = hits[0]
+            ans = qa.answer(g, "", [best["id"]], as_of=_as_of())
+            others = [f"{h['name']} ({h['label']} {h['id']}, score {h['score']})" for h in hits[1:]]
+            return ans.render() + (("\nOther matches: " + "; ".join(others)) if others else "")
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {type(exc).__name__}: {exc}"
 
 
 if __name__ == "__main__":

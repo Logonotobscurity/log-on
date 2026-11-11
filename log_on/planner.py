@@ -18,6 +18,7 @@ from .state import PlanStep
 
 
 class Planner(Protocol):
+    """`plan(goal)` (Phase 1) or `plan(goal, context)` (Phase 2: memories + linked graph entities)."""
     name: str
 
     def plan(self, goal: str) -> list[PlanStep]: ...
@@ -27,12 +28,42 @@ EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 CUST_RE = re.compile(r"\b(C-?\d{4})\b", re.I)
 MATH_RE = re.compile(r"[-+*/().%\d\s]*\d[-+*/().%\d\s]*[-+*/%][-+*/().%\d\s]*\d[-+*/().%\d\s]*")
 REPORT_RE = re.compile(r"\b(q3 revenue|weekly ops)\b", re.I)
+GRAPH_TOPIC_RE = re.compile(r"\b(suppliers?|vendors?|contracts?|customers?|account managers?|subcontract\w*|"
+                            r"subsidiar\w*|expir\w*|renewals?|serves?|supplies)\b", re.I)
+PATH_RE = re.compile(r"\b(path|connected|connection|linked|related|relationship)\b", re.I)
+ENTITY_Q_RE = re.compile(r"^\s*(who|what) (is|are)\b|\btell me about\b|\bprofile of\b|\blook ?up\b", re.I)
+SELF_REF_RE = re.compile(r"\b(my|our)\b", re.I)
+
+
+def _graph_plan(goal: str, context: dict | None) -> list[PlanStep]:
+    """Phase 2 rules: route graph questions to the read-only KG tools, using linked entities from context."""
+    ctx = context or {}
+    ents = ctx.get("entities", [])
+    in_goal = [e for e in ents if e.get("from") == "goal"]
+    from_memory = [e for e in ents if e.get("from") == "memory"]
+    if PATH_RE.search(goal) and len(in_goal) >= 2:
+        return [{"tool": "find_path", "args": {"source": in_goal[0]["id"], "target": in_goal[1]["id"], "max_hops": 5},
+                 "reason": f"multi-hop connection between {in_goal[0]['name']} and {in_goal[1]['name']}"}]
+    if ENTITY_Q_RE.search(goal) and len(in_goal) == 1 and not GRAPH_TOPIC_RE.search(
+            re.sub(re.escape(in_goal[0]["name"]), "", goal, flags=re.I)):
+        return [{"tool": "entity_lookup", "args": {"name": in_goal[0]["name"]}, "reason": "entity profile"}]
+    if GRAPH_TOPIC_RE.search(goal) and ctx.get("graph_available"):
+        ids = [e["id"] for e in in_goal]
+        reason = "multi-hop graph question"
+        if not ids and SELF_REF_RE.search(goal) and from_memory:
+            ids = [e["id"] for e in from_memory]
+            reason += f" (resolved 'my ...' from memory: {', '.join(e['name'] for e in from_memory)})"
+        args: dict = {"question": goal}
+        if ids:
+            args["entity_ids"] = ids
+        return [{"tool": "graph_query", "args": args, "reason": reason}]
+    return []
 
 
 class RuleBasedPlanner:
     name = "rule-based"
 
-    def plan(self, goal: str) -> list[PlanStep]:
+    def plan(self, goal: str, context: dict | None = None) -> list[PlanStep]:
         g = goal.strip()
         steps: list[PlanStep] = []
         report = REPORT_RE.search(g)
@@ -54,6 +85,9 @@ class RuleBasedPlanner:
             if "-" not in cid:
                 cid = cid[0] + "-" + cid[1:]
             return [{"tool": "lookup_customer", "args": {"customer_id": cid}, "reason": "CRM lookup"}]
+        graph_steps = _graph_plan(g, context)
+        if graph_steps:
+            return graph_steps
         m = MATH_RE.search(g)
         if m and re.search(r"\b(calc|calculate|compute|what is|what's|sum|total)\b|[-+*/]", g, re.I):
             return [{"tool": "calculator", "args": {"expression": m.group(0).strip()}, "reason": "arithmetic"}]
@@ -67,7 +101,12 @@ Allowed tools and args:
 - lookup_customer(customer_id: str)  # ids look like C-1001
 - get_report(name: str)  # 'Q3 revenue' or 'weekly ops'
 - send_report(recipient: str, subject: str, body: str)  # body may be "{{steps[N].output}}"
-Return {"steps":[]} if the goal cannot be done with these tools."""
+- graph_query(question: str, cypher: str = "", entity_ids: list[str] = [])  # business knowledge graph, read-only
+- find_path(source: str, target: str, max_hops: int = 5)  # how two graph entities are connected
+- entity_lookup(name: str)  # profile of a customer / supplier / contract / person
+Return {"steps":[]} if the goal cannot be done with these tools.
+The user message may include CONTEXT with remembered facts, user instructions and linked graph entities;
+use entity ids from it. Never put personal data (emails, phones, ID numbers) into tool args you invent."""
 
 
 class LLMPlanner:
@@ -82,11 +121,15 @@ class LLMPlanner:
         self.timeout = timeout
         self.last_error: str | None = None
 
-    def _complete(self, goal: str) -> str:
+    def _complete(self, goal: str, context: dict | None = None) -> str:
+        user = goal
+        if context:
+            user += "\n\nCONTEXT:\n" + json.dumps({k: v for k, v in context.items() if k != "graph_available"},
+                                                   default=str)[:4000]
         body = json.dumps({"model": self.model, "temperature": 0,
                            "response_format": {"type": "json_object"},
                            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                                        {"role": "user", "content": goal}]}).encode()
+                                        {"role": "user", "content": user}]}).encode()
         req = urllib.request.Request(f"{self.base_url}/chat/completions", data=body, method="POST",
                                      headers={"Authorization": f"Bearer {self.api_key}",
                                               "Content-Type": "application/json"})
@@ -106,12 +149,13 @@ class LLMPlanner:
             out.append({"tool": s["tool"], "args": s.get("args", {}), "reason": str(s.get("reason", ""))})
         return out
 
-    def plan(self, goal: str) -> list[PlanStep]:
+    def plan(self, goal: str, context: dict | None = None) -> list[PlanStep]:
+        self.last_error = None
         try:
-            return self.parse(self._complete(goal))
+            return self.parse(self._complete(goal, context) if context else self._complete(goal))
         except Exception as exc:  # noqa: BLE001 - any LLM failure falls back to deterministic rules
             self.last_error = f"{type(exc).__name__}: {exc}"
-            return self.fallback.plan(goal)
+            return self.fallback.plan(goal, context)
 
 
 def get_planner() -> Planner:

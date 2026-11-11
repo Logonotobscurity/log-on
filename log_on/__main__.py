@@ -3,10 +3,14 @@
   python -m log_on "Send the Q3 revenue report to finance@acme.example"      # pauses, prints run id
   python -m log_on --resume <run_id> --approve                               # or --deny
   python -m log_on "Calculate 2*21" --auto-approve                            # approve inline
+
+Phase 2 (default): long-term memory in runs/memory.sqlite and, if `python -m log_on.ingest <pdf>` has been
+run, the knowledge graph at runs/graph.kuzu (or Neo4j with LOG_ON_GRAPH_BACKEND=neo4j). --phase1 disables both.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 from pathlib import Path
 
@@ -25,18 +29,31 @@ def main() -> None:
     g.add_argument("--deny", action="store_true")
     ap.add_argument("--auto-approve", action="store_true", help="approve any pause immediately (testing only)")
     ap.add_argument("--runs-dir", default="runs")
+    ap.add_argument("--user", default="rhonda", help="memory namespace (Phase 2)")
+    ap.add_argument("--phase1", action="store_true", help="disable Phase 2 memory + knowledge graph")
     a = ap.parse_args()
 
     runs = Path(a.runs_dir); runs.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(runs / "checkpoints.sqlite", check_same_thread=False)
-    orch = Orchestrator(audit_path=runs / "audit.jsonl", outbox=runs / "outbox.jsonl", checkpointer=SqliteSaver(conn))
+    extra = {}
+    if not a.phase1:
+        from .memory import MemoryManager, make_memory_store
+        store, emb = make_memory_store(runs / "memory.sqlite")
+        extra["memory"] = MemoryManager(store, emb)
+        graph = Path(os.environ.get("LOG_ON_GRAPH_PATH", runs / "graph.kuzu"))
+        if os.environ.get("LOG_ON_GRAPH_BACKEND", "kuzu") == "neo4j":
+            extra["graph_backend"] = "neo4j"
+        elif graph.exists():
+            extra["graph_path"] = graph
+    orch = Orchestrator(audit_path=runs / "audit.jsonl", outbox=runs / "outbox.jsonl", checkpointer=SqliteSaver(conn),
+                        **extra)
 
     if a.resume:
         if not (a.approve or a.deny):
             ap.error("--resume needs --approve or --deny")
         res = orch.resume(a.resume, approved=a.approve)
     elif a.goal:
-        res = orch.start(a.goal)
+        res = orch.start(a.goal, user=a.user)
         if res["status"] == "awaiting_approval" and a.auto_approve:
             res = orch.resume(res["run_id"], approved=True, approver="auto-approve")
     else:

@@ -15,6 +15,10 @@ TOOL_POLICY: dict[str, dict[str, Any]] = {
     "get_report": {"risk": "low", "approval": False},
     "lookup_customer": {"risk": "medium", "approval": False},
     "send_report": {"risk": "high", "approval": True},
+    # Phase 2: read-only knowledge-graph tools. medium = output still passes the PII guard.
+    "graph_query": {"risk": "medium", "approval": False},
+    "find_path": {"risk": "low", "approval": False},
+    "entity_lookup": {"risk": "medium", "approval": False},
 }
 
 
