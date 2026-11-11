@@ -10,3 +10,12 @@ runs/
 .env.*
 *.onnx
 reports/
+# Phase 4
+.venv*/
+.ruff_cache/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+models/
+*.db

@@ -28,7 +28,7 @@ def test_policy_allows(goal):
 def test_redactors():
     assert EmailRedactor().validate("hi a.b@c.io").fix_value == "hi <EMAIL>"
     assert PhoneRedactor().validate("call 0803 123 4567").fix_value == "call <PHONE>"
-    assert PhoneRedactor().validate("call +234 815 514 4633").fix_value == "call <PHONE>"
+    assert PhoneRedactor().validate("call +234 802 555 0199").fix_value == "call <PHONE>"
     assert NINRedactor().validate("NIN: 12345678901").fix_value == "NIN: <NIN>"
     assert CardRedactor().validate("card 4111-1111-1111-1111").fix_value == "card <CARD>"
     assert CardRedactor().validate("order 1234567890123").passed  # fails Luhn -> not a card
