@@ -208,7 +208,7 @@ def answer(store: GraphStore, question: str = "", entity_ids: list[str] | None =
                           rows, T_SUPPLIERS_EXPIRING, params, 3, _collect_sources(rows))
         rows = store.query(T_CONTRACTS_EXPIRING, params)
         total = sum(r["value_m"] or 0 for r in rows)
-        lines = [f"{r['contract']} {r['customer']}: {r['service']}, {_fmt_ngn(r["value_m"])}, expires {r['expiry']}"
+        lines = [f"{r['contract']} {r['customer']}: {r['service']}, {_fmt_ngn(r['value_m'])}, expires {r['expiry']}"
                  for r in rows]
         return Answer("contracts_expiring",
                       f"{len(rows)} contract(s) worth {_fmt_ngn(total)} expire in {period}:\n- " + "\n- ".join(lines)
@@ -226,7 +226,7 @@ def answer(store: GraphStore, question: str = "", entity_ids: list[str] | None =
         group = cust_ids + [s["id"] for s in subs]
         rows = store.query(T_GROUP_CONTRACTS, {"ids": group})
         total = sum(r["value_m"] or 0 for r in rows)
-        lines = [f"{r['contract']} {r['customer']}: {_fmt_ngn(r["value_m"])}, expires {r['expiry']}" for r in rows]
+        lines = [f"{r['contract']} {r['customer']}: {_fmt_ngn(r['value_m'])}, expires {r['expiry']}" for r in rows]
         names = ", ".join(s["name"] for s in subs) or "none"
         return Answer("group_exposure", f"Group exposure {_fmt_ngn(total)} across {len(rows)} contract(s) "
                       f"(subsidiaries: {names}):\n- " + "\n- ".join(lines), subs + rows,
