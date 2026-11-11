@@ -37,9 +37,12 @@ def test_resume_is_a_second_trace_of_the_same_run(tmp_path):
     o = make(tmp_path)
     r = o.start("Send the Q3 revenue report to finance@acme.example")
     o.resume(r["run_id"], approved=True)
-    spans = spans_for(load_spans(tmp_path / "traces.jsonl"), r["run_id"])
+    all_spans = load_spans(tmp_path / "traces.jsonl")
+    spans = spans_for(all_spans, r["run_id"])
     roots = [s for s in spans if s["parent_span_id"] is None]
-    assert [s["name"] for s in roots] == ["run.start", "run.resume"]
+    assert [s["name"] for s in roots] == ["run.start", "run.resume"], (
+        f"{len(all_spans)} spans in file, {len(spans)} for run {r['run_id']}, exporters={o.tracer.exporters} "
+        f"errors={o.tracer.errors} roots={[x['name'] for x in all_spans if x['parent_span_id'] is None]}")
     assert len({s["trace_id"] for s in roots}) == 2
     assert any(s["name"] == "tool.send_report" for s in spans)
 
