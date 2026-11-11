@@ -1,0 +1,65 @@
+{
+  "plan": {
+    "traces": [],
+    "train": [],
+    "demos": [
+      {
+        "augmented": true,
+        "goal": "Get the Q3 revenue report",
+        "context": "{\"entities\":[]}",
+        "tools": "calculator(expression: str)  - arithmetic only\nlookup_customer(customer_id: str)  - CRM record, ids look like C-1001\nget_report(name: str)  - 'q3 revenue' or 'weekly ops'\nsend_report(recipient: str, subject: str, body: str)  - email a report; body is usually \"{{steps[0].output}}\" after get_report\ngraph_query(question: str, entity_ids: list[str])  - business knowledge graph (suppliers, contracts, customers), read-only\nfind_path(source: str, target: str, max_hops: int)  - how two graph entities (by id) are connected\nentity_lookup(name: str)  - profile of one customer / supplier / contract / person",
+        "steps_json": "[{\"tool\": \"get_report\", \"args\": {\"name\": \"Q3 revenue\"}}]"
+      },
+      {
+        "augmented": true,
+        "goal": "Show the weekly ops report",
+        "context": "{\"entities\":[]}",
+        "tools": "calculator(expression: str)  - arithmetic only\nlookup_customer(customer_id: str)  - CRM record, ids look like C-1001\nget_report(name: str)  - 'q3 revenue' or 'weekly ops'\nsend_report(recipient: str, subject: str, body: str)  - email a report; body is usually \"{{steps[0].output}}\" after get_report\ngraph_query(question: str, entity_ids: list[str])  - business knowledge graph (suppliers, contracts, customers), read-only\nfind_path(source: str, target: str, max_hops: int)  - how two graph entities (by id) are connected\nentity_lookup(name: str)  - profile of one customer / supplier / contract / person",
+        "steps_json": "[{\"tool\": \"get_report\", \"args\": {\"name\": \"weekly ops\"}}]"
+      },
+      {
+        "augmented": true,
+        "goal": "Who supplies Eko Pharma?",
+        "context": "{\"entities\":[{\"id\":\"CUS-005\",\"name\":\"Eko Pharma Distribution Ltd\",\"label\":\"Customer\",\"from\":\"goal\"}]}",
+        "tools": "calculator(expression: str)  - arithmetic only\nlookup_customer(customer_id: str)  - CRM record, ids look like C-1001\nget_report(name: str)  - 'q3 revenue' or 'weekly ops'\nsend_report(recipient: str, subject: str, body: str)  - email a report; body is usually \"{{steps[0].output}}\" after get_report\ngraph_query(question: str, entity_ids: list[str])  - business knowledge graph (suppliers, contracts, customers), read-only\nfind_path(source: str, target: str, max_hops: int)  - how two graph entities (by id) are connected\nentity_lookup(name: str)  - profile of one customer / supplier / contract / person",
+        "steps_json": "[{\"tool\": \"graph_query\", \"args\": {\"question\": \"Who supplies Eko Pharma?\", \"entity_ids\": [\"CUS-005\"]}}]"
+      },
+      {
+        "augmented": true,
+        "goal": "Which suppliers serve my focus customer?",
+        "context": "{\"entities\":[{\"id\":\"CUS-005\",\"name\":\"Eko Pharma Distribution Ltd\",\"label\":\"Customer\",\"from\":\"memory\"}],\"memories\":[\"my focus customer is Eko Pharma Distribution Ltd\"]}",
+        "tools": "calculator(expression: str)  - arithmetic only\nlookup_customer(customer_id: str)  - CRM record, ids look like C-1001\nget_report(name: str)  - 'q3 revenue' or 'weekly ops'\nsend_report(recipient: str, subject: str, body: str)  - email a report; body is usually \"{{steps[0].output}}\" after get_report\ngraph_query(question: str, entity_ids: list[str])  - business knowledge graph (suppliers, contracts, customers), read-only\nfind_path(source: str, target: str, max_hops: int)  - how two graph entities (by id) are connected\nentity_lookup(name: str)  - profile of one customer / supplier / contract / person",
+        "steps_json": "[{\"tool\": \"graph_query\", \"args\": {\"question\": \"Which suppliers serve Eko Pharma Distribution Ltd?\", \"entity_ids\": [\"CUS-005\"]}}]"
+      }
+    ],
+    "signature": {
+      "instructions": "You are the planning module of a safe business agent. Turn the user's goal into the shortest list of\ntool calls that achieves it, using ONLY the listed tools. Use entity ids from the context for graph tools.\nReturn [] if no listed tool fits. Never invent personal data (emails, phone numbers, ID numbers).",
+      "fields": [
+        {
+          "prefix": "Goal:",
+          "description": "${goal}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "JSON: linked knowledge-graph entities (id, name, label) and remembered facts"
+        },
+        {
+          "prefix": "Tools:",
+          "description": "the only tools you may call"
+        },
+        {
+          "prefix": "Steps Json:",
+          "description": "JSON list, e.g. [{\"tool\": \"calculator\", \"args\": {\"expression\": \"2+2\"}}]"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.13",
+      "dspy": "3.5.0",
+      "cloudpickle": "3.1"
+    }
+  }
+}
