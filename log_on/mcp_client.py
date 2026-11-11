@@ -5,10 +5,13 @@ import asyncio
 import os
 import re
 import sys
+import time
 from typing import Any, Callable
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from .signals import failed
 
 
 # Graph/as-of settings are forwarded to the server process; nothing else from the parent env leaks in.
@@ -58,14 +61,24 @@ async def _acall(calls: list[tuple[str, dict]], outbox: str | None,
                 if name not in tools:
                     results.append({"tool": name, "args": args, "ok": False, "output": f"tool '{name}' not offered by server"})
                     continue
+                deps = [int(m.group(1)) for v in args.values() if isinstance(v, str) for m in _TEMPLATE.finditer(v)]
+                bad = [i for i in deps if i < len(results) and failed(results[i])]
+                if bad:
+                    # Fail fast: never feed an error message into a later step (e.g. email a "No report named" body).
+                    results.append({"tool": name, "args": args, "ok": False, "skipped": True,
+                                    "output": f"skipped: depends on step {bad[0]}, which failed"})
+                    continue
                 args = _resolve(args, results)
                 ann = tools[name]
                 if egress_filter and ann is not None and ann.open_world_hint:
                     # Data leaving the system (email/report) is scrubbed before the call, not after.
                     args = {k: egress_filter(v) if isinstance(v, str) and k not in EGRESS_EXEMPT else v
                             for k, v in args.items()}
+                t0 = time.time_ns()
                 res = await session.call_tool(name, args)
-                results.append({"tool": name, "args": args, "ok": not res.is_error, "output": _text(res)})
+                # started_ns/ended_ns feed the Phase 3 tool spans; the orchestrator pops them before state/audit.
+                results.append({"tool": name, "args": args, "ok": not res.is_error, "output": _text(res),
+                                "started_ns": t0, "ended_ns": time.time_ns()})
             return {"tools": tools, "results": results}
 
 
