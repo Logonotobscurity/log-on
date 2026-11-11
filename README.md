@@ -242,12 +242,46 @@ extra false positives on the 32 normal/edge eval cases; cost about +23 ms (p50) 
 process. The red team grew from 186 to 532 attacks; after the fixes 0 succeed with the rule planner and with the live
 Qwen2.5-1.5B planner, and all 532 are now regression cases in the eval gate (588 cases in total).
 
+## Production deployment (post-Phase-4 step 3)
+
+Container, shared state in Postgres, provenance on every audit record, per-user daily budgets and health checks.
+
+```bash
+cp .env.example .env && $EDITOR .env        # POSTGRES_PASSWORD, LOG_ON_APPROVER_TOKENS, budgets (never commit .env)
+GIT_SHA=$(git rev-parse HEAD) docker compose build                 # WITH_ML=1 in .env adds Presidio + the injection model runtime
+docker compose up -d postgres approval-ui                           # approval UI on http://127.0.0.1:8765 (localhost only)
+docker compose run --rm app "Send the Q3 revenue report to finance@acme.example" --user ada   # one-shot agent run
+docker compose --profile llm up -d llamacpp                         # optional local model; GGUF mounted read-only from LOG_ON_MODELS_DIR
+curl -s http://127.0.0.1:8765/readyz                                # readiness: checkpointer, audit log, quota store
+docker compose run --rm --entrypoint python app -m log_on.audit verify runs/audit.jsonl
+```
+
+| Piece | What it does |
+|---|---|
+| `Dockerfile` | Multi-stage (venv built in a builder stage, copied into `python:3.13-slim`), runs as uid 10001, no weights / runs / secrets in the image (`.dockerignore`), `GIT_SHA` build arg becomes the audit stamp, `WITH_ML=1` installs `requirements-ml.txt`, HEALTHCHECK on `/healthz` |
+| `docker-compose.yml` | `postgres` (17-alpine, healthcheck, not published), `approval-ui` (port bound to 127.0.0.1, `/readyz` healthcheck), `app` (one-shot CLI, profile `cli`), `llamacpp` (profile `llm`, official llama.cpp server image). App containers are read-only, `no-new-privileges`, all capabilities dropped. Secrets only through `.env` (`${POSTGRES_PASSWORD:?}` fails fast if unset) |
+| Checkpointer | `LOG_ON_CHECKPOINTER=sqlite` (default, `runs/checkpoints.sqlite`), `postgres` (pooled `PostgresSaver`, tables created on first use; `pip install -r requirements-prod.txt`), or `memory`. With Postgres, a run paused in one container is approved from another |
+| Provenance (O-3) | Every audit record carries `prov`: code SHA (`LOG_ON_GIT_SHA` in containers, else `git rev-parse HEAD` + `-dirty`), `policy_version`, `policy_hash` (policy/permission/guard sources + safety settings), planner prompt id (`rule-based`, `llm:sha256:…`, `dspy:<version>`), provider and model. It is inside the hashed body, so editing it breaks the chain. `python -m log_on.audit verify [--require-provenance]` checks the chain and that no stamp was dropped (older unstamped records are reported as legacy) |
+| Daily budgets | Per user and per day (`LOG_ON_QUOTA_TZ`, default Africa/Lagos): runs, tokens and estimated cost. Checked atomically when a run starts and before every LLM-backed step (planning, replan, an LLM verifier). A stop ends the run with status `quota_exceeded`, a plain message and a `quota_stop` audit record (limits, usage, reason). Refused runs are not counted; pause/resume counts once |
+| Health | `/healthz` (liveness) and `/readyz` (checkpointer reachable, audit log writable and intact at the tail, quota store reachable; 503 otherwise). No auth, no personal data |
+
+| Var | Effect |
+|---|---|
+| `LOG_ON_CHECKPOINTER` | `sqlite` (default), `postgres`, `memory` |
+| `LOG_ON_POSTGRES_DSN` | `postgresql://user:password@host:5432/db` (env only; compose builds it from `.env`) |
+| `LOG_ON_USER_DAILY_RUNS`, `LOG_ON_USER_DAILY_TOKENS`, `LOG_ON_USER_DAILY_COST_USD` | default daily limits per user (unset/0 = unlimited; all unset = feature off) |
+| `LOG_ON_USER_BUDGETS` | per-user overrides, e.g. `ada:runs=50,tokens=200000,cost=1;guest:runs=3` |
+| `LOG_ON_QUOTA_DB`, `LOG_ON_QUOTA_DSN`, `LOG_ON_QUOTA_TZ` | budget store (SQLite file, default `runs/quota.sqlite`; or Postgres, default the checkpointer DSN when `LOG_ON_CHECKPOINTER=postgres`) and the day's time zone |
+| `LOG_ON_USER` | default `--user` for the CLI (memory namespace and budget owner) |
+| `LOG_ON_GIT_SHA` | code version for the audit stamp (set by the Docker build) |
+| `LOG_ON_UI_HOST`, `LOG_ON_UI_PORT` | approval UI bind address (container: `0.0.0.0:8765`, published on 127.0.0.1 only) |
+
 ## Run it
 
 ```bash
 cd log_on
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # or python -m venv + pip
-.venv/bin/python -m pytest -v                    # 215 tests across Phases 1-4, approval UI, ML safety (6 need Neo4j, 1 a live model; ML tests skip without requirements-ml.txt)
+.venv/bin/python -m pytest -v                    # 234 tests: Phases 1-4, approval UI, ML safety, production (Neo4j / live model / Postgres tests skip without them)
 .venv/bin/python -m log_on.evals                 # Phase 3 trajectory eval suite + threshold gate (exit 1 on failure)
 .venv/bin/python -m log_on.demo --phase3         # Phase 3 walkthrough (loop, escalation, re-approval, budget, trace replay, evals)
 .venv/bin/python -m log_on "What is 2^10 + 5"    # verifier catches 10+5, reviser retries with 2**10 + 5
@@ -301,6 +335,7 @@ whenever `NEO4J_PASSWORD` is set and the server is reachable.
 Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/test_results_step3.txt`, `docs/eval_report_step3.txt`: post-Phase-4 step 3 (production hardening) runs; usage in *Production deployment* above.
 - `docs/safety_ml_report.md`, `docs/safety_bench.json`, `docs/redteam/step2_*`, `docs/eval_report_safety_ml.txt`, `docs/test_results_safety_ml.txt`: post-Phase-4 step 2 (ML safety layer) results.
 - `docs/test_results_approval_ui.txt`: captured test run after adding the approval web UI.
 - `docs/phase4_study_notes.md`: Efficiently Serving LLMs / vLLM, DSPy, Red Teaming LLM Applications mapped to code, 3 exercises each.
@@ -315,6 +350,13 @@ Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" repor
 - `docs/demo_output.txt`, `docs/test_results.txt`: captured Phase 1 runs.
 
 ## Known limitations (honest list)
+
+Post-Phase-4 step 3 (production hardening):
+- **The Docker image has not been built here** (no Docker daemon on the dev box). The Dockerfile passes hadolint 2.15, `docker compose config` validates the compose file, and every pinned dependency resolves to a Python 3.13 manylinux wheel, but the first real `docker compose build` / `up` still has to happen on a machine with Docker.
+- **Postgres was tested against a local PostgreSQL 16.2** (pause in one orchestrator, approve from another, quota store). The compose file uses 17-alpine; CI is configured to test against 17 once GitHub billing allows runs.
+- **Budgets use estimated tokens and cost** (the Phase 3 ledger: API-reported usage when present, else chars/4); the rule planner spends only context tokens. A run already past its last gate (e.g. executing tools) finishes; limits are checked before LLM-backed steps, not mid-call.
+- **Provenance identifies versions, it does not prove them**: the stamp is what the process reports (a modified checkout shows `-dirty`; a container trusts its `GIT_SHA` build arg). The hash chain is tamper-evident, not tamper-proof (anyone who can rewrite the whole file can re-chain it); ship the log off-box for that.
+- **The approval UI is plain HTTP on localhost.** Exposing it needs HTTPS (a reverse proxy) and a real secret store for approver tokens; there is no hosted deployment yet.
 
 Post-Phase-4 step 2 (ML safety layer):
 - **The injection classifier is noisy on short user commands** ("Repeat the last answer but shorter" scores ~1.0), so on user input it only counts with lexical corroboration. That keeps false positives at the regex level but means it adds little on direct requests the regexes already cover; its real gains are paraphrases and untrusted text. 7 of 20 held-out phrasings still pass the input policy (mostly single-customer NIN/card requests in Nigerian languages or with a fake authority); the output redactor still masks the data in those answers.
@@ -335,7 +377,7 @@ Phase 3:
 - **The rule verifier is narrow.** It understands calculator, report, CRM, send and graph results. Other answers pass on "no error signal, non-empty output". Error detection is regex based (`signals.py`), so a tool that fails in an unusual wording slips through.
 - **The rule reviser knows a handful of repairs.** Anything else escalates to a human, which is safe but not autonomous.
 - **The LLM verifier and LLM reviser have only been tested with a fake model** (no API key here). Their token/cost accounting uses the API's `usage` when present, else a chars/4 estimate; the price table is an estimate, not billing.
-- **Budgets are per run**, not per user or per day. Steps are counted per node execution.
+- **Budgets are per run** (per-user/day budgets were added in post-Phase-4 step 3). Steps are counted per node execution.
 - **Tracing exporters**: JSONL and console are tested; OTLP and Langfuse exporters are configured and constructed in tests but have not been run against a live Jaeger/Phoenix/Langfuse server here.
 - **CI**: the workflow runs the same commands that pass in a fresh local Python 3.13 venv, but see the repo's latest Actions run for its real status.
 - The most visible latency (≈1–2 s per action) is spawning the stdio MCP server, as the traces show. The tool calls themselves take milliseconds.

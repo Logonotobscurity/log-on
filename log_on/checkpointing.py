@@ -45,6 +45,8 @@ def make_checkpointer(runs_dir: str | Path = "runs", kind: str | None = None, ds
             raise RuntimeError("Postgres checkpointer needs: pip install -r requirements-prod.txt") from e
         pool = ConnectionPool(dsn, min_size=1, max_size=int(os.getenv("LOG_ON_POSTGRES_POOL", "5")), open=True,
                               kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row})
+        import atexit
+        atexit.register(pool.close, timeout=2)  # clean CLI exit (no "couldn't stop thread" warning)
         saver = PostgresSaver(pool)
         saver.setup()  # idempotent migrations
         return saver

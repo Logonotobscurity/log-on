@@ -33,7 +33,7 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 | **Rollback and compensation** | After execution, how do you undo it? Needs a per-tool compensating action and idempotency keys | X-2 |
 | **Rate limits and timeouts per tool** | Stops runaway loops and protects downstream APIs | X-3 |
 | **Data retention and NDPR/GDPR** | The audit log is append-only, but PII law needs retention limits and deletion rules. Redact before writing, as we already do | S-3 |
-| **Prompt and plan versioning** | You need to know which prompt or policy version produced each decision | O-3 |
+| **Prompt and plan versioning** | You need to know which prompt or policy version produced each decision. **Done in post-Phase-4 step 3** (provenance stamp in every audit record) | O-3 |
 
 ## Risky assumptions
 - **Unity Catalog needs Databricks.** The "Governing AI Agents" course is Databricks-specific. OSS Unity Catalog exists but has far less tooling. **Recommendation:** model governance locally first (a tool registry plus a data-classification table in SQLite or Postgres), and only adopt UC if you're actually on Databricks.
@@ -82,10 +82,10 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 - **L-1** A feedback capture step (approver notes, deny reasons) goes into a dataset.
 - **L-2** Proposal-only learning: a job that suggests new policy rules or few-shot examples from failures, opens a PR, and requires E-1 and E-2 to pass in CI.
 - ~~**D-1**~~ **Mostly done in Phase 3.** `.github/workflows/ci.yml`: tests, eval gate, a simple secret pattern scan, artifacts. Lint (ruff) is still to add.
-- **D-2** Container plus deploy (Cloud Run, Fly.io or Vercel functions for the API, with a Postgres checkpointer).
+- **D-2** Container plus deploy (Cloud Run, Fly.io or Vercel functions for the API, with a Postgres checkpointer). **Container + Postgres checkpointer done (post-Phase-4 step 3)**: `Dockerfile`, `docker-compose.yml`, `LOG_ON_CHECKPOINTER=postgres`. A hosted deploy (Cloud Run / Fly.io) and HTTPS in front of the approval UI are still open.
 - **D-3** Model serving decision: a hosted API vs vLLM on a rented GPU, decided on E-3 results and cost from O-1.
 - **G-1** Governance registry: tools, data classes, owners and policy versions (local table; UC only if on Databricks).
-- **O-3** Version prompts, policies and validator configs, and stamp the versions into every audit record.
+- ~~**O-3**~~ **Done (post-Phase-4 step 3)**: `log_on/provenance.py` stamps code SHA, `POLICY_VERSION` + a hash of the policy/permission/guard sources and safety settings, the planner prompt id and provider/model into every audit record (inside the hash chain); `python -m log_on.audit verify` checks chain + stamps. Original ticket: Version prompts, policies and validator configs, and stamp the versions into every audit record.
 
 
 ## What next (after Phase 4)
@@ -100,8 +100,8 @@ Phase 4 is built, but three results say where the real work is:
    examples, try `--optimizer mipro`. Promote only when the full-suite gate passes, with a named approver.
 3. ~~**Beyond regex safety (V-1).**~~ (done: step 2 below) The policy and redactor are still pattern-based; add Presidio / an ML injection
    classifier behind the same interfaces and re-run the red team. Grow the attack seeds beyond 14.
-4. **Operational gaps.** ~~An approval UI instead of the CLI~~ (done: step 1 below), container + deploy (D-2) with a Postgres
-   checkpointer, stamping prompt/policy versions into every audit record (O-3), per-user/day budgets.
+4. ~~**Operational gaps.**~~ (done: steps 1 and 3 below) ~~An approval UI instead of the CLI~~, ~~container (D-2) with a Postgres
+   checkpointer~~, ~~stamping prompt/policy versions into every audit record (O-3)~~, ~~per-user/day budgets~~. A hosted deploy is open.
 5. **CI.** The GitHub Actions workflow (tests, eval gate, red-team gate, registry check) is in place but cannot run
    while the GitHub account has a billing lock. Clearing that makes every push gated automatically.
 
@@ -111,4 +111,12 @@ Phase 4 is built, but three results say where the real work is:
 |---|---|---|
 | 1 Approval web UI (A-1, feeds L-1) | Local web app listing LangGraph approval interrupts with a redacted preview (steps, risk tiers, destinations, policy/permission reasons, memory warnings); named approvers via `LOG_ON_APPROVER_TOKENS`; approve / reject with a note (reason required to reject); expiry (`LOG_ON_APPROVAL_TTL_S`, default 24 h, then auto-deny); stale-form check; every decision in the run's hash-chained audit log and in the hash-chained feedback log `runs/feedback.jsonl` (learning data for L-1). CLI shares the same service (`--pending`, `--by`, `--note`) | **Done** (10 tests) |
 | 2 Smarter safety checks (V-1) | Presidio (Nigerian NIN/BVN/phone, cards, IBAN/IP/crypto) and an ONNX prompt-injection classifier behind the existing policy/redactor/memory interfaces, regex layer first and as fallback (`LOG_ON_PII_BACKEND`, `LOG_ON_INJECTION_ML`); quarantine of injected sentences in tool output / retrieved documents; red team grown 186 → 532 attacks (Nigerian languages, encodings, hidden comments, multi-turn, poisoned documents), found 3 vulnerable + 125 contained bypasses, fixed to 0 with the rule and live Qwen2.5-1.5B planners; 532 regression cases in the eval gate; `python -m log_on.evals.safety_bench` (PII recall 85% → 100%, held-out injections 1/20 → 13/20, +23 ms p50) | **Done** (42 new tests; suite 166 → 215) |
-| 3 Production hardening (D-2, O-3, budgets) | Dockerfile/compose, Postgres checkpointer option, prompt/policy version in every audit record, per-user/day budgets | Next |
+| 3 Production hardening (D-2, O-3, budgets) | Multi-stage non-root `Dockerfile` (`WITH_ML`, `GIT_SHA` build args) + `docker-compose.yml` (approval UI, one-shot app, Postgres 17, optional llama.cpp profile; secrets only via `.env`, `.env.example` placeholders) + `.dockerignore`; `LOG_ON_CHECKPOINTER=sqlite\|postgres\|memory` (pooled `PostgresSaver`, tested against a real local Postgres 16); O-3 provenance stamp in every audit record + `python -m log_on.audit verify`; per-user/day runs/tokens/cost budgets enforced at intake and before LLM-backed steps, persisted in SQLite or Postgres, `quota_stop` audit record; `/readyz` on the approval UI; CI Postgres service + hadolint/compose checks. Docker itself was not available on the dev box: Dockerfile linted with hadolint 2.15 (clean), compose validated with `docker compose config`, wheels resolved for Python 3.13 | **Done** (19 new tests; suite 215 → 234) |
+
+All three approved post-Phase-4 steps are done. What needs Rhonda next:
+1. **A stronger model** (ticket D-3): a rented GPU for `deploy/vllm` (Qwen2.5-7B/14B) or a hosted API key, then re-run
+   the serving benchmark, DSPy optimisation and the live-model red team. The 1.5B CPU model is too weak for prompt optimisation.
+2. **GitHub billing**: clear the lock at https://github.com/settings/billing so CI (tests with a Postgres service, eval gate,
+   red-team gate, Dockerfile/compose checks) runs on every push; then `gh workflow run ci.yml`.
+3. **A first real `docker compose build`** on a machine with Docker (the image has not been built yet), and a decision on
+   hosting (Cloud Run / Fly.io / a VPS) with HTTPS in front of the approval UI.
