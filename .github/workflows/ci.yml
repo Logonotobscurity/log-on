@@ -1,0 +1,104 @@
+# LOG_ON CI: unit/integration tests + the trajectory eval gate on every push and PR.
+# Translated from the CircleCI pipeline in DeepLearning.AI's "Automated Testing for LLMOps":
+# rule-based checks every commit; the eval suite fails the build if scores drop below evals/thresholds.json.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LOG_ON_AS_OF: "2026-11-11"          # graph "Q1" questions are relative to this date
+      LOG_ON_TRACE_EXPORTERS: jsonl       # no network exporters in CI
+      PYTHONUNBUFFERED: "1"
+      # Neo4j tests skip automatically (no NEO4J_PASSWORD). No LLM key: rule-based planner/verifier only.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache fastembed model (BAAI/bge-small-en-v1.5)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-bge-small-en-v1.5-${{ hashFiles('requirements.txt') }}
+
+      - name: Warm embedding model (falls back to hash embeddings if the download fails)
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from log_on.memory.embeddings import get_embedder
+          fn, name = get_embedder()
+          print("embedder:", name, len(fn(["warm up"])[0]))
+          if name.startswith("hash"):
+              print("::warning::fastembed model unavailable; memory tests use the hashing embedder")
+          PY
+
+      - name: Secret / real-identifier scan
+        run: |
+          # Fails if a key-like string is committed. Real personal identifiers must never be used as test data.
+          if git grep -nE '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16})' -- . ':!*.md'; then
+            echo "::error::possible secret committed"; exit 1
+          fi
+
+      - name: Tests
+        run: python -m pytest -v -rs --junitxml=reports/junit.xml
+
+      - name: Trajectory eval gate
+        run: python -m log_on.evals --out reports/eval_report.json --workdir reports/eval_runs
+
+      - name: Eval summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("reports/eval_report.json")
+          if not p.exists():
+              print("No eval report (eval step did not run)."); raise SystemExit
+          r = json.loads(p.read_text()); s = r["summary"]
+          print("## LOG_ON trajectory evals")
+          print(f"cases **{s['cases']}** · overall **{s['overall_score']}** · pass rate **{s['pass_rate']}** · "
+                f"attack pass rate **{s['attack_pass_rate']}** · PII leaks **{s['pii_leaks']}**")
+          print("\n| metric | score |\n|---|---|")
+          for k, v in s["metrics"].items():
+              print(f"| {k} | {v} |")
+          if r["threshold_failures"]:
+              print("\n**Gate failures:** " + "; ".join(r["threshold_failures"]))
+          if s["failed"]:
+              print("\nFailed cases: " + ", ".join(s["failed"]))
+          PY
+
+      - name: Upload reports and traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: log_on-reports
+          path: |
+            reports/junit.xml
+            reports/eval_report.json
+            reports/eval_runs/*/traces.jsonl
+            reports/eval_runs/*/audit.jsonl
+          if-no-files-found: warn
+          retention-days: 14
