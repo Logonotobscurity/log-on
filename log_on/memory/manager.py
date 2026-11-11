@@ -33,7 +33,7 @@ from .embeddings import DIMS, get_embedder
 # Stricter than the output guard: natural-language credential statements are never memorised.
 MEMORY_SECRET_RE = re.compile(r"(?i)\b(password|passcode|passphrase|pin|otp|api[ _-]?key|secret|token|cvv)\b"
                               r"(?:\s+(?:for|of|on|to)\b[^.\n]{0,40}?)?\s*(\bis\b|\bwas\b|=|:)")
-PII_TAG_RE = re.compile(r"<(EMAIL|PHONE|NIN|CARD|SECRET)>")
+PII_TAG_RE = re.compile(r"<(EMAIL|PHONE|NIN|BVN|CARD|IBAN|IP|CRYPTO|PERSON|SECRET)>")
 
 
 class MemoryWriteRejected(ValueError):
@@ -105,6 +105,11 @@ class MemoryManager:
     def guard(text: str) -> tuple[str, list[str]]:
         if MEMORY_SECRET_RE.search(text) or SECRET_RE.search(text):
             raise MemoryWriteRejected("looks like a credential/secret; secrets are never stored in memory")
+        from ..guards.injection_ml import is_injection
+        from ..policy import looks_like_injection, ml_corroborated
+        # post-Phase-4 step 2: no planted instructions (ML hit needs corroboration, as for user input)
+        if looks_like_injection(text) or (is_injection(text)[0] and ml_corroborated([text])):
+            raise MemoryWriteRejected("looks like an instruction to override the assistant's rules; not stored")
         clean = redact_text(text)
         tags = sorted(set(PII_TAG_RE.findall(clean)))
         if not re.sub(r"<[A-Z]+>|[\W_]", "", clean):
