@@ -31,6 +31,19 @@ def est_tokens(text: Any) -> int:
 
 SELF_HOSTED = {"vllm", "llamacpp", "ollama", "fake"}  # Phase 4: no per-token bill (hardware cost is fixed)
 
+# Per-provider list prices, USD per 1M tokens (input, output), read 2026-11-11 from
+#   Groq: https://console.groq.com/docs/models          OpenRouter: https://openrouter.ai/api/v1/models
+# The same model costs different amounts on different hosts, so the provider is part of the key. Models missing
+# here fall back to PRICES_PER_MTOK and then to the pessimistic default. OpenRouter also returns the billed cost
+# in `usage.cost`; when present that number is used instead of this table (see add_usage).
+PROVIDER_PRICES: dict[str, dict[str, tuple[float, float]]] = {
+    "groq": {"openai/gpt-oss-120b": (0.15, 0.60), "openai/gpt-oss-20b": (0.075, 0.30),
+             "qwen/qwen3.8-27b": (0.80, 4.00)},
+    "openrouter": {"qwen/qwen-2.5-72b-instruct": (0.36, 0.40), "meta-llama/llama-3.3-70b-instruct": (0.71, 0.71),
+                   "qwen/qwen3-235b-a22b-2507": (0.14, 0.80), "openai/gpt-oss-120b": (0.15, 0.60)},
+}
+PROVIDER_FAMILY = {"groq-qwen": "groq", "openrouter-free": "openrouter"}
+
 
 def price_for(model: str | None, provider: str | None = None) -> tuple[float, float]:
     if provider in SELF_HOSTED and not os.getenv("LOG_ON_PRICE_IN"):
@@ -39,10 +52,18 @@ def price_for(model: str | None, provider: str | None = None) -> tuple[float, fl
         return float(os.getenv("LOG_ON_PRICE_IN", "0")), float(os.getenv("LOG_ON_PRICE_OUT", "0"))
     if not model:
         return PRICES_PER_MTOK["rule-based"]
+    family = PROVIDER_FAMILY.get(provider or "", provider or "")
+    if family == "openrouter" and model.endswith(":free"):
+        return 0.0, 0.0
+    if model in PROVIDER_PRICES.get(family, {}):
+        return PROVIDER_PRICES[family][model]
     return PRICES_PER_MTOK.get(model, PRICES_PER_MTOK["default"])
 
 
-def llm_cost(model: str | None, prompt_tokens: int, completion_tokens: int, provider: str | None = None) -> float:
+def llm_cost(model: str | None, prompt_tokens: int, completion_tokens: int, provider: str | None = None,
+             reported: float | None = None) -> float:
+    if reported is not None:  # the provider's own bill for this call (OpenRouter usage.cost)
+        return float(reported)
     pin, pout = price_for(model, provider)
     return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000
 
@@ -64,7 +85,7 @@ def add_usage(base: dict | None, *, steps: int = 0, llm: dict | None = None, too
         u["completion_tokens"] += llm.get("completion_tokens", 0)
         u["est_cost_usd"] = round(u["est_cost_usd"] + llm_cost(llm.get("model"), llm.get("prompt_tokens", 0),
                                                                llm.get("completion_tokens", 0),
-                                                               llm.get("provider")), 6)
+                                                               llm.get("provider"), llm.get("cost_usd")), 6)
     u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"] + u["context_tokens"]
     return u
 

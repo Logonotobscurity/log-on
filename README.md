@@ -135,7 +135,7 @@ whole agent is attacked automatically, with every fixed attack frozen as a regre
 
 | Layer | Implementation | File |
 |---|---|---|
-| Serving | One OpenAI-compatible `Provider` (stdlib HTTP, retries, JSON mode, lenient JSON parsing, usage capture) used by the planner, verifier, KG extractor, DSPy and the red team. Presets: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `fake` (deterministic test server with error / garbage / malicious / slow modes). Self-hosted models cost $0/token in the budget ledger | `log_on/serving/`, `log_on/llm.py` |
+| Serving | One OpenAI-compatible `Provider` (stdlib HTTP, retries, JSON mode, lenient JSON parsing, usage capture) used by the planner, verifier, KG extractor, DSPy and the red team. Presets: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `groq`, `groq-qwen`, `openrouter`, `openrouter-free`, `fake` (deterministic test server with error / garbage / malicious / slow modes). Self-hosted models cost $0/token in the budget ledger | `log_on/serving/`, `log_on/llm.py` |
 | GPU / CPU deploy | vLLM docker-compose (PagedAttention, continuous batching, prefix caching) for a GPU host; llama.cpp `llama-server` script for CPU (used here: Qwen2.5-1.5B-Instruct Q4_K_M) | `deploy/vllm/`, `scripts/serve_llamacpp.sh` |
 | Benchmark | Concurrency sweep: req/s, tok/s, latency and TTFT p50/p95, valid-plan rate | `log_on/serving/bench.py`, `docs/benchmark_phase4.md` |
 | DSPy | `PlannerProgram` / verifier signatures, BootstrapFewShot (MIPROv2 optional), metric built from the Phase 3 trajectory grader, full-suite eval gate | `log_on/learning/` |
@@ -160,6 +160,14 @@ export LOG_ON_LLM_PROVIDER=llamacpp LOG_ON_LLM_BASE_URL=http://127.0.0.1:8082/v1
 .venv/bin/python -m log_on.redteam --gate                                   # rule planner, exit 1 on any successful attack
 .venv/bin/python -m log_on.redteam --planner llm --provider llamacpp       # live model as planner
 LOG_ON_PLANNER=dspy .venv/bin/python -m log_on "Look up customer C-1001"   # uses the approved DSPy program, if any
+```
+
+Hosted providers (Groq, OpenRouter): presets, key isolation, 429 retry-after handling, per-provider prices and a
+side-by-side comparison (bench + eval gate with the LLM planner + sampled red team) are described in `docs/providers.md`:
+
+```bash
+export GROQ_API_KEY=... OPENROUTER_API_KEY=...     # never commit them
+.venv/bin/python -m log_on.serving.compare           # -> docs/provider_comparison.json + .md
 ```
 
 ## Approval web UI
@@ -327,7 +335,9 @@ Environment variables:
 
 | Var | Effect |
 |---|---|
-| `LOG_ON_LLM_PROVIDER` | Phase 4: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `fake`, or `none` (force rules) |
+| `LOG_ON_LLM_PROVIDER` | Phase 4: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `groq`, `groq-qwen`, `openrouter`, `openrouter-free`, `fake`, or `none` (force rules) |
+| `GROQ_API_KEY`, `OPENROUTER_API_KEY` | keys for the hosted presets; each is only sent to its own provider (`docs/providers.md`) |
+| `LOG_ON_LLM_RPM` | client-side requests/minute cap per model (defaults: Groq 30, OpenRouter free 20; `0` = off) |
 | `LOG_ON_PLANNER` | `dspy` to use the human-approved DSPy planner program from `prompts/registry.json` |
 | `LOG_ON_TRUSTED_DOMAINS` | comma list of domains customer records may be emailed to (default `acme.example`) |
 | `LOG_ON_LLM_API_KEY` (or `OPENAI_API_KEY`) | switch planning to `LLMPlanner` (hosted `openai` preset if no provider is set) |
@@ -356,6 +366,7 @@ whenever `NEO4J_PASSWORD` is set and the server is reachable.
 Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/providers.md`: Groq / OpenRouter presets, model choices with sources, rate limits, costs, and the comparison command (`docs/provider_comparison.*` once run with keys); `docs/test_results_providers.txt`, `docs/eval_report_providers.txt`: test and eval-gate runs after adding them.
 - `docs/dashboard.md`, `docs/ui/*.png`: the `/ui` dashboard (pages, 13-layer mapping, claims, security); `docs/test_results_dashboard.txt`, `docs/eval_report_dashboard.txt`: test and eval-gate runs after adding it.
 - `docs/test_results_step3.txt`, `docs/eval_report_step3.txt`: post-Phase-4 step 3 (production hardening) runs; usage in *Production deployment* above.
 - `docs/safety_ml_report.md`, `docs/safety_bench.json`, `docs/redteam/step2_*`, `docs/eval_report_safety_ml.txt`, `docs/test_results_safety_ml.txt`: post-Phase-4 step 2 (ML safety layer) results.

@@ -17,7 +17,6 @@ import json
 import platform
 import statistics
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -42,12 +41,10 @@ def stream_once(provider: Provider, system: str, user: str, max_tokens: int = 96
     body = {"model": c.model, "temperature": 0, "max_tokens": max_tokens, "stream": True,
             "stream_options": {"include_usage": True}, "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-    req = urllib.request.Request(f"{c.base_url}/chat/completions", data=json.dumps(body).encode(), method="POST",
-                                 headers={"Authorization": f"Bearer {c.api_key or 'local'}",
-                                          "Content-Type": "application/json", "Accept": "text/event-stream"})
     t0 = time.perf_counter()
     ttft, text, ctoks = None, [], None
-    with urllib.request.urlopen(req, timeout=c.timeout) as resp:
+    # Provider.open adds the preset's headers/extra body, client-side pacing and 429 retry-after handling
+    with provider.open("/chat/completions", body, extra_headers={"Accept": "text/event-stream"}) as resp:
         ctype = resp.headers.get("Content-Type", "")
         if "event-stream" not in ctype:  # server ignored stream=True (e.g. the fake server)
             data = json.loads(resp.read())
@@ -63,6 +60,8 @@ def stream_once(provider: Provider, system: str, user: str, max_tokens: int = 96
                 if payload == "[DONE]":
                     break
                 ev = json.loads(payload)
+                if ev.get("error"):  # e.g. OpenRouter mid-stream rate limit (HTTP 200 already sent)
+                    raise RuntimeError(f"stream error {ev['error'].get('code')}: {str(ev['error'].get('message'))[:120]}")
                 if ev.get("usage"):
                     ctoks = ev["usage"].get("completion_tokens")
                 for ch in ev.get("choices") or []:

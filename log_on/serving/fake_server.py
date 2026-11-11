@@ -10,6 +10,9 @@ Behaviour is chosen per request from the system prompt:
 
 Modes (constructor / --mode) simulate failure cases the stack must survive:
   normal | error (HTTP 500) | garbage (non-JSON) | malicious (planner returns an exfiltration plan) | slow
+`rate_limit_first=N` answers the first N chat requests with HTTP 429 (+ `rate_limit_headers`, e.g. Retry-After or
+Groq's x-ratelimit-reset-tokens), like a hosted free tier. The last request's headers and body are kept in
+`last_headers` / `last_body` so tests can check what a preset sends (memory only, never logged).
 `delay_ms` adds latency per request; `per_token_ms` adds latency per generated token (crude decode model),
 and `slots` caps concurrent "decoding" requests, like llama.cpp's -np / a GPU's batch budget.
 
@@ -59,8 +62,14 @@ def respond(system: str, user: str, mode: str = "normal") -> str:
 
 class FakeServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 0, mode: str = "normal", delay_ms: float = 0,
-                 per_token_ms: float = 0, slots: int = 0, model: str = "log-on-fake"):
+                 per_token_ms: float = 0, slots: int = 0, model: str = "log-on-fake", rate_limit_first: int = 0,
+                 rate_limit_headers: dict | None = None, report_cost: float | None = None):
         self.mode, self.delay_ms, self.per_token_ms, self.model = mode, delay_ms, per_token_ms, model
+        self.rate_limit_first, self.rate_limited = rate_limit_first, 0
+        self.rate_limit_headers = {"Retry-After": "0"} if rate_limit_headers is None else rate_limit_headers
+        self.report_cost = report_cost
+        self.last_headers: dict = {}
+        self.last_body: dict = {}
         self.requests = 0
         self.max_inflight = 0
         self._inflight = 0
@@ -82,9 +91,11 @@ class FakeServer:
             def log_message(self, *a):  # quiet
                 pass
 
-            def _send(self, code: int, obj) -> None:
+            def _send(self, code: int, obj, headers: dict | None = None) -> None:
                 body = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
                 self.send_response(code)
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -105,7 +116,14 @@ class FakeServer:
                     srv.requests += 1
                     srv._inflight += 1
                     srv.max_inflight = max(srv.max_inflight, srv._inflight)
+                    srv.last_headers, srv.last_body = dict(self.headers.items()), req
+                    limited = srv.rate_limited < srv.rate_limit_first
+                    if limited:
+                        srv.rate_limited += 1
                 try:
+                    if limited:
+                        return self._send(429, {"error": {"code": 429, "message": "Rate limit exceeded"}},
+                                          srv.rate_limit_headers)
                     if srv.mode == "error":
                         return self._send(500, {"error": "simulated outage"})
                     msgs = req.get("messages", [])
@@ -128,7 +146,8 @@ class FakeServer:
                         "id": f"fake-{srv.requests}", "object": "chat.completion", "model": srv.model,
                         "choices": [{"index": 0, "finish_reason": "stop",
                                      "message": {"role": "assistant", "content": content}}],
-                        "usage": {"prompt_tokens": ptoks, "completion_tokens": ctoks, "total_tokens": ptoks + ctoks},
+                        "usage": {"prompt_tokens": ptoks, "completion_tokens": ctoks, "total_tokens": ptoks + ctoks,
+                                  **({"cost": srv.report_cost} if srv.report_cost is not None else {})},
                         "timings": {"predicted_n": ctoks, "predicted_ms": gen_ms}})
                 finally:
                     with srv._lock:
