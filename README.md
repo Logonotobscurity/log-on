@@ -164,7 +164,7 @@ LOG_ON_PLANNER=dspy .venv/bin/python -m log_on "Look up customer C-1001"   # use
 
 ## Approval web UI
 
-A small local web app for reviewing paused actions (Starlette, server-rendered HTML, no JavaScript). It reads the same
+A small local web app for reviewing paused actions (Starlette, server-rendered HTML; the classic pages use no JavaScript). It reads the same
 `runs/checkpoints.sqlite` as the CLI, so a run paused by `python -m log_on "<goal>"` shows up there.
 
 ```bash
@@ -204,6 +204,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 
 The CLI goes through the same service: `python -m log_on --pending`, `python -m log_on --resume <run_id> --approve --by ada
 --note "checked"` (or `--deny --note "reason"`). Pages: `/` queue, `/approvals/<run_id>` review, `/history` decisions.
+
+## Dashboard (`/ui`)
+
+The approval app also serves a dashboard (Deckle dark-letterpress design, server-rendered, self-hosted fonts, inline
+SVG, ~50 lines of JS) at `http://127.0.0.1:8765/ui`, behind the same approver tokens:
+
+| Page | Shows |
+|---|---|
+| Story `/ui` | runs and outcomes, approvals waiting, eval gate, audit chain seal, two claim-vs-breaking-point panels |
+| Journey `/ui/journey` | a selected run through the 13 layers (passed / blocked / paused / escalated / not reached) with its audit records |
+| Approvals `/ui/approvals` | the queue with redacted previews; approve / reject through the existing CSRF-protected handler |
+| Audit `/ui/audit` | hash-chain verification, provenance stamps (O-3), filterable records |
+| Safety `/ui/safety` | eval gate, red team before/after, safety bench, held-out misses, claim vs breaking point |
+| Ops `/ui/ops` | per-user daily budgets, span latencies and cost, serving benchmark, DSPy versions the gate refused |
+| Analysis `/ui/analysis` | thesis / antithesis / pragmatic next move, generated from the same data |
+
+JSON for each view under `/api/ui/…`. Demo data: `python -m log_on.dashboard.seed --runs-dir runs_demo` (fictional
+identifiers, git-ignored, shown with a DEMO DATA banner), then `python -m log_on.approval_ui --runs-dir runs_demo`.
+Details, layer mapping and screenshots: `docs/dashboard.md`.
+
+![Dashboard story page](docs/ui/story.png)
 
 ## Smarter safety checks (ML layer, optional)
 
@@ -335,6 +356,7 @@ whenever `NEO4J_PASSWORD` is set and the server is reachable.
 Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/dashboard.md`, `docs/ui/*.png`: the `/ui` dashboard (pages, 13-layer mapping, claims, security); `docs/test_results_dashboard.txt`, `docs/eval_report_dashboard.txt`: test and eval-gate runs after adding it.
 - `docs/test_results_step3.txt`, `docs/eval_report_step3.txt`: post-Phase-4 step 3 (production hardening) runs; usage in *Production deployment* above.
 - `docs/safety_ml_report.md`, `docs/safety_bench.json`, `docs/redteam/step2_*`, `docs/eval_report_safety_ml.txt`, `docs/test_results_safety_ml.txt`: post-Phase-4 step 2 (ML safety layer) results.
 - `docs/test_results_approval_ui.txt`: captured test run after adding the approval web UI.
@@ -350,6 +372,12 @@ Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" repor
 - `docs/demo_output.txt`, `docs/test_results.txt`: captured Phase 1 runs.
 
 ## Known limitations (honest list)
+
+Dashboard (`/ui`):
+- **Evidence is read from files, not measured live**: eval, red-team, benchmark and serving numbers are whatever the committed `docs/` files say; re-run the tools to refresh them. The container image does not ship `docs/` (mount it and set `LOG_ON_DOCS_DIR`).
+- **Budget meters show today only**, telemetry comes from the local JSONL trace exporter, and pages re-verify the whole log on each request (fine for thousands of records, not millions).
+- **The 13-layer mapping is a fixed table** in `log_on/dashboard/data.py`; three layers (orchestration, execution, and approval's position) are not separate mechanisms in LOG_ON, and the Journey page says so.
+- **The analysis text is templated**: numbers update, the arguments do not.
 
 Post-Phase-4 step 3 (production hardening):
 - **The Docker image has not been built here** (no Docker daemon on the dev box). The Dockerfile passes hadolint 2.15, `docker compose config` validates the compose file, and every pinned dependency resolves to a Python 3.13 manylinux wheel, but the first real `docker compose build` / `up` still has to happen on a machine with Docker.

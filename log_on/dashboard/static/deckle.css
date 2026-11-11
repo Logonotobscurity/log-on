@@ -168,3 +168,5 @@ footer{max-width:1320px;margin:0 auto;padding:18px 28px 40px;font:12px var(--mon
 #audit-rows td.mono,#audit-rows td:nth-child(2),#audit-rows td:nth-child(3){white-space:nowrap;overflow-wrap:normal}
 h1,h2,h3,.goal,.claim{overflow-wrap:anywhere}
 main{overflow-x:hidden}
+#steps td:nth-child(2),#steps td:nth-child(3),#steps td:nth-child(6){white-space:nowrap;overflow-wrap:normal}
+#steps code,#audit-rows code{word-break:normal}

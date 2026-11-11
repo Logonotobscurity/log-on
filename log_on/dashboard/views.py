@@ -225,7 +225,7 @@ def journey_body(rs: list[dict], j: dict | None, sel: str | None) -> str:
             f'<i>not reached</i> when it stopped first.</p><ol class="track cols">{lis}</ol></div>'
             '<div class="card"><h3>As executed</h3><p class="small muted">The audit records for this run, in chain order. '
             'LOG_ON checks policy before reading memory and asks for approval before acting.</p>'
-            f'<div class="scroll"><table><thead><tr><th>#</th><th>When</th><th>Node</th><th>Result</th><th>What happened</th>'
+            f'<div class="scroll"><table id="steps"><thead><tr><th>#</th><th>When</th><th>Node</th><th>Result</th><th>What happened</th>'
             f'<th>Hash</th></tr></thead><tbody>{steps}</tbody></table></div></div>')
     return (head("A request's journey", "Thirteen doors, one request.",
                  "Select a run to see which layers it passed, where it was blocked, paused for a person or escalated, "
