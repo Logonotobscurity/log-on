@@ -25,7 +25,7 @@ flowchart LR
     K --> PL[planner<br/>rules / LLM / DSPy]
     PL --> PE{permission<br/>risk tiers, recipient provenance,<br/>PII data-flow, plan refs}
     PE -- refused --> A
-    PE -- high risk --> AP[[human approval ⏸]]
+    PE -- high risk --> AP[[human approval ⏸<br/>web UI / CLI, expiry]]
     PE -- low/medium --> X
     AP -- approved --> X[action: MCP tools]
     AP -- denied --> A
@@ -162,12 +162,55 @@ export LOG_ON_LLM_PROVIDER=llamacpp LOG_ON_LLM_BASE_URL=http://127.0.0.1:8082/v1
 LOG_ON_PLANNER=dspy .venv/bin/python -m log_on "Look up customer C-1001"   # uses the approved DSPy program, if any
 ```
 
+## Approval web UI
+
+A small local web app for reviewing paused actions (Starlette, server-rendered HTML, no JavaScript). It reads the same
+`runs/checkpoints.sqlite` as the CLI, so a run paused by `python -m log_on "<goal>"` shows up there.
+
+```bash
+# 1. give each approver a token (kept in your environment only, never in a file in this repo)
+.venv/bin/python -m log_on.approval_ui --gen-token ada      # prints: export LOG_ON_APPROVER_TOKENS="ada:<random>"
+export LOG_ON_APPROVER_TOKENS="ada:<token-from-step-1>"      # several: "ada:<t1>,bayo:<t2>" (>= 16 chars each)
+
+# 2. something to approve
+.venv/bin/python -m log_on "Send the Q3 revenue report to finance@acme.example"
+
+# 3. start the UI (127.0.0.1:8765 by default) and sign in with the token
+.venv/bin/python -m log_on.approval_ui                       # --runs-dir, --port, --phase1 / --no-loop to match the CLI
+```
+
+What each pending request shows: the request (PII redacted), every plan step with its risk tier and what it will do,
+where data goes (recipient masked to `f*****e@acme.example`, with a trusted-domain check), how data flows between steps,
+why it paused (input policy result, which steps need approval, checks already passed), earlier denials for the same
+recipient from memory, and when it expires.
+
+| Rule | How |
+|---|---|
+| Named approvers | The approver's name comes from their token (`LOG_ON_APPROVER_TOKENS="name:token"`), not from a form field. Machine names (`auto`, `system…`, `eval`) are refused |
+| Approve / reject | Approve with an optional note; rejecting needs a reason. The graph resumes immediately (`Orchestrator.resume`) |
+| Expiry | `LOG_ON_APPROVAL_TTL_S` (default 86400 = 24 h) from the moment the run paused. Expired requests can't be approved; they are denied automatically (approver `system:expiry`) when the queue is viewed or someone acts on them |
+| Stale pages | Each form carries the LangGraph interrupt id; if the request changed (e.g. a re-approval after a retry), the decision is refused |
+| Audit | Every decision is written to the run's hash-chained `runs/audit.jsonl` (node `approval_decision`, plus the existing `approval` record) |
+| Feedback for learning (L-1) | Decision, approver, note / reject reason, redacted goal and steps, outcome go to the hash-chained `runs/feedback.jsonl`. Notes are PII-redacted before writing |
+| Web security | Binds to localhost; HttpOnly + SameSite=Strict cookie; CSRF value on every form; CSP, no-frame, no-store headers; the server won't start without tokens |
+
+JSON API (same rules), handy for scripts or a future Slack bot:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/approvals
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d '{"decision": "reject", "note": "finance already has it"}' http://127.0.0.1:8765/api/approvals/<run_id>/decide
+```
+
+The CLI goes through the same service: `python -m log_on --pending`, `python -m log_on --resume <run_id> --approve --by ada
+--note "checked"` (or `--deny --note "reason"`). Pages: `/` queue, `/approvals/<run_id>` review, `/history` decisions.
+
 ## Run it
 
 ```bash
 cd log_on
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # or python -m venv + pip
-.venv/bin/python -m pytest -v                    # 156 tests across Phases 1-4 (6 need Neo4j, 1 needs a live model, else skipped)
+.venv/bin/python -m pytest -v                    # 166 tests across Phases 1-4 + approval UI (6 need Neo4j, 1 needs a live model, else skipped)
 .venv/bin/python -m log_on.evals                 # Phase 3 trajectory eval suite + threshold gate (exit 1 on failure)
 .venv/bin/python -m log_on.demo --phase3         # Phase 3 walkthrough (loop, escalation, re-approval, budget, trace replay, evals)
 .venv/bin/python -m log_on "What is 2^10 + 5"    # verifier catches 10+5, reviser retries with 2**10 + 5
@@ -209,6 +252,9 @@ Environment variables:
 | `LOG_ON_TRACE_EXPORTERS` | comma list: `jsonl` (default), `console`, `otlp`, `langfuse`, `none` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP target for `otlp` (e.g. `http://localhost:4318` for Jaeger / a collector, Phoenix on 6006) |
 | `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | self-hosted Langfuse for `langfuse` (sent to `<host>/api/public/otel/v1/traces`) |
+| `LOG_ON_APPROVER_TOKENS` | approval web UI: `name:token[,name:token]` (tokens ≥ 16 chars; generate with `python -m log_on.approval_ui --gen-token NAME`) |
+| `LOG_ON_APPROVAL_TTL_S` | seconds before a pending approval expires and is auto-denied (default 86400) |
+| `LOG_ON_APPROVER` | default `--by` name for CLI approvals (default `rhonda`) |
 
 Neo4j (optional): `docker run -p7474:7474 -p7687:7687 -e NEO4J_AUTH=neo4j/<password> neo4j:5`, or without Docker
 download the Neo4j 5 community tarball plus a Java 21 JRE, run `bin/neo4j-admin dbms set-initial-password <password>`, then `bin/neo4j start`.
@@ -218,6 +264,7 @@ whenever `NEO4J_PASSWORD` is set and the server is reachable.
 Outputs land in `runs/` (`audit.jsonl`, `outbox.jsonl` — the mock "sent" reports, `checkpoints.sqlite`, `traces.jsonl`).
 
 ## Docs
+- `docs/test_results_approval_ui.txt`: captured test run after adding the approval web UI.
 - `docs/phase4_study_notes.md`: Efficiently Serving LLMs / vLLM, DSPy, Red Teaming LLM Applications mapped to code, 3 exercises each.
 - `docs/benchmark_phase4.md`, `docs/dspy_report_phase4.md`, `docs/redteam_report_phase4.md`, `docs/demo_output_phase4.txt`, `docs/eval_report_phase4.txt`, `docs/test_results_phase4.txt`: Phase 4 results (raw JSON in `docs/benchmarks/`, `docs/redteam/`).
 - `docs/phase3_study_notes.md`: Loop Engineering, Automated Testing for LLMOps, Evaluating & Debugging GenAI and Evaluating AI Agents mapped to code, 3 exercises each.
@@ -262,4 +309,4 @@ Phase 1:
 - Guardrails are regex and wordlist based, so expect false negatives (an unlabelled phone in an odd format, toxicity phrased politely) and some false positives (any 11-digit number is treated as a NIN). ML validators (Presidio) are still open as roadmap ticket V-1.
 - The MCP server process is spawned once per `action` node, which is simple and isolated but adds about 0.5 s per run.
 - `send_report` is a mock. It writes to `runs/outbox.jsonl` and sends no email.
-- The approval step uses the CLI and code only; there's no approval UI yet.
+- ~~No approval UI~~: a local approval web UI now exists (see *Approval web UI*). Slack/Teams approval is not built.

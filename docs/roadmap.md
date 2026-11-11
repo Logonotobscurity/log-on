@@ -26,7 +26,7 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 |---|---|---|
 | **Cost and token tracking, budgets** | LLM and tool spend per run, per user and per day. Without it an agent loop can burn money | O-1 |
 | **Secrets management** | API keys, MCP server credentials and DB passwords. These shouldn't sit in `.env` in a repo | S-1 |
-| **Approval UI** | Approval is currently a CLI flag. Real approvers need a queue showing a diff of what will happen, plus expiry | A-1 |
+| **Approval UI** | ~~Approval is currently a CLI flag.~~ **Done (post-Phase-4 step 1):** `python -m log_on.approval_ui`, a queue with a redacted preview of what will happen, named approvers, notes, expiry | A-1 |
 | **Identity and authorisation (who is asking)** | Policy doesn't depend on the user yet. Needs RBAC (role- and attribute-based) per tool and per data scope | S-2 |
 | **Observability and tracing** | The audit log covers compliance, not debugging. Needs traces with spans and latency (OpenTelemetry, Langfuse or LangSmith) | O-2 |
 | **Evaluation datasets** | "Evaluation" needs golden tasks plus adversarial (red-team) sets, versioned, before any "learning" | E-1, E-2 |
@@ -61,7 +61,7 @@ so a refused or injected prompt never reads (or poisons) memory or the graph. Me
 - **S-1** Secrets: load keys from env or a secrets manager (Doppler, 1Password CLI or GCP Secret Manager) through one `secrets.py`. Never log them. Add a `SecretLeak` scan to the audit writer and CI.
 - **S-2** RBAC: `user` → roles → allowed tools and data scopes in `permissions.py`. `lookup_customer` needs the `support` role. Write tests for each role.
 - **S-3** Retention: audit rotation plus a `purge --before` that keeps the hash-chain checkpoints.
-- **A-1** Approval UI: a small FastAPI page or Slack interactive message that lists pending interrupts (`graph.get_state`), shows the plan diff, approves or denies via `Command(resume)`, and auto-denies after expiry.
+- ~~**A-1**~~ **Done (post-Phase-4 step 1)** with Starlette server-rendered HTML + JSON API (`log_on/approval_ui.py`, `log_on/approvals.py`); Slack approval is still open. Original ticket: Approval UI: a small FastAPI page or Slack interactive message that lists pending interrupts (`graph.get_state`), shows the plan diff, approves or denies via `Command(resume)`, and auto-denies after expiry.
 - **V-1** Replace regex PII with Presidio. Add a zero-shot toxicity or topic classifier, keeping the regex as a fallback.
 
 ### Phase 3: Execution, real tools and evaluation
@@ -100,7 +100,15 @@ Phase 4 is built, but three results say where the real work is:
    examples, try `--optimizer mipro`. Promote only when the full-suite gate passes, with a named approver.
 3. **Beyond regex safety (V-1).** The policy and redactor are still pattern-based; add Presidio / an ML injection
    classifier behind the same interfaces and re-run the red team. Grow the attack seeds beyond 14.
-4. **Operational gaps.** An approval UI instead of the CLI (still open), container + deploy (D-2) with a Postgres
+4. **Operational gaps.** ~~An approval UI instead of the CLI~~ (done: step 1 below), container + deploy (D-2) with a Postgres
    checkpointer, stamping prompt/policy versions into every audit record (O-3), per-user/day budgets.
 5. **CI.** The GitHub Actions workflow (tests, eval gate, red-team gate, registry check) is in place but cannot run
    while the GitHub account has a billing lock. Clearing that makes every push gated automatically.
+
+### Post-Phase-4 progress (approved order: 1 approval UI → 2 smarter safety checks → 3 production hardening)
+
+| Step | Scope | Status |
+|---|---|---|
+| 1 Approval web UI (A-1, feeds L-1) | Local web app listing LangGraph approval interrupts with a redacted preview (steps, risk tiers, destinations, policy/permission reasons, memory warnings); named approvers via `LOG_ON_APPROVER_TOKENS`; approve / reject with a note (reason required to reject); expiry (`LOG_ON_APPROVAL_TTL_S`, default 24 h, then auto-deny); stale-form check; every decision in the run's hash-chained audit log and in the hash-chained feedback log `runs/feedback.jsonl` (learning data for L-1). CLI shares the same service (`--pending`, `--by`, `--note`) | **Done** (10 tests) |
+| 2 Smarter safety checks (V-1) | Presidio + ML injection classifier behind the existing interfaces, more red-team seeds, re-run red team | Next |
+| 3 Production hardening (D-2, O-3, budgets) | Dockerfile/compose, Postgres checkpointer option, prompt/policy version in every audit record, per-user/day budgets | Planned |

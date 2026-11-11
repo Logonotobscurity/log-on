@@ -1,0 +1,13 @@
+# .venv/bin/python -m pytest -rs   (2026-11-11 WAT, after adding the approval web UI; no Neo4j, no live model)
+..................................sssss.................s............... [ 43%]
+........................................................................ [ 86%]
+....s.................                                                   [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_phase2_kg.py:62: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:75: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:83: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:93: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_kg.py:106: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase2_memory.py:143: Neo4j not reachable (set NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD to run)
+SKIPPED [1] tests/test_phase4_serving.py:110: set LOG_ON_TEST_LIVE_LLM=<base_url> to test a real local model server
+159 passed, 7 skipped in 86.40s (0:01:26)
