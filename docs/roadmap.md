@@ -1,9 +1,19 @@
 # LOG_ON roadmap: analysis of the plan and tickets for Phases 2–4
 
-> I couldn't read the plan file (it wasn't on the box when this was built). This analysis works from its outline: the 13-layer
-> pipeline (intake → memory → policy → orchestration → planning → permission → action → validation → approval → execution →
-> audit → evaluation → learning), 18 DeepLearning.AI courses and 4 build phases, which mention Unity Catalog, vLLM and CircleCI.
-> Please re-check it against the full text.
+> Phase 1 was planned from the plan's outline. Phase 2 was built against the full plan text (18 courses across 6 pillars and
+> 4 phases). The 13-layer order is intake → memory → policy → orchestration → planning → permission → action → validation → approval →
+> execution → audit → evaluation → learning.
+
+## Status
+| Phase | Plan deliverable | Status |
+|---|---|---|
+| 1 Safe Orchestrator | Goal → MCP tool → blocked if output violates a guardrail | **Done** (26 tests) |
+| 2 Grounded Memory | Raw PDF → entities in Neo4j → multi-hop QA from the orchestrator, with session state | **Done** (38 tests). Kuzu embedded is the default backend and Neo4j 5 is supported and tested on the same Cypher. Long-term memory has semantic, episodic and procedural stores |
+| 3 Autonomous Loop & Telemetry | Verification loop, W&B traces, CI eval gate | Next |
+| 4 Scale & Optimization | vLLM, DSPy, Giskard red-team | Later |
+
+**Deviation from the plan's order:** the plan puts *memory* before *policy*. LOG_ON runs `memory_retrieval` **after** the input policy,
+so a refused or injected prompt never reads (or poisons) memory or the graph. Memory *writes* happen after output validation.
 
 ## Strengths
 - **Safety comes first in the order.** Policy, permission, validation and approval all sit before execution, and audit and evaluation come after. Most agent tutorials leave these out.
@@ -37,9 +47,17 @@
 ## Concrete tickets
 
 ### Phase 2: Memory, identity and secrets
-- **M-1** Add a LangGraph `Store` (SQLite, later Postgres) with namespaces `(user, "facts")` and `(user, "episodes")`, plus a new `memory` node between intake and policy that loads relevant memories into state. Done when a test shows the second run uses a fact stored in the first.
-- **M-2** Episodic memory from audit: after `audit`, write a redacted run summary to the store. Never store raw tool outputs.
-- **M-3** Memory write policy: memory writes go through the same Guard (no PII or secrets). Test it.
+- ~~**M-1**~~ **Done.** LangGraph `SqliteStore` with `("memories", user, semantic|episodic|procedural)` namespaces. The `memory_retrieval` node sits after policy and before planning. `test_cross_session_recall_resolves_my_customer` proves a second session uses a fact stored in the first.
+- ~~**M-2**~~ **Done.** The `memory_update` node writes a redacted episode per run (goal, status, tools, first 300 characters of the validated output; never raw tool output).
+- ~~**M-3**~~ **Done.** Writes go through the Phase 1 redactor and credentials are rejected. Tests scan the raw SQLite and WAL bytes.
+- ~~**K-1**~~ **Done.** PDF ingestion with provenance, schema-first KG extraction, Kuzu and Neo4j stores, multi-hop QA via MCP tools.
+- **K-2** LLM extraction + text-to-Cypher evaluated against the template answers (study notes, KG exercise 2). Needs an API key.
+- **K-3** Incremental ingestion: per-document upsert and delete (the graph is rebuilt per load today), a document registry, and re-ingestion when a file's hash changes.
+- **K-4** OCR path for scanned PDFs and a fallback for borderless tables (Document AI exercises 1–2).
+- **K-5** Full-text and vector index on graph nodes (Neo4j FTS / Kuzu FTS) instead of in-Python entity linking, for large graphs.
+- **K-6** Decide the long-term embedded graph engine (Kuzu 0.11.3 is archived upstream; candidates are LadybugDB or Neo4j only).
+- **M-4** Forget/retention: a user-confirmed "forget …", a TTL on episodic memory, and purging checkpoints that hold raw goals (NDPR).
+- **M-5** Optional LLM memory curator (implicit memories), gated by the same write guard and a PII eval set.
 - **S-1** Secrets: load keys from env or a secrets manager (Doppler, 1Password CLI or GCP Secret Manager) through one `secrets.py`. Never log them. Add a `SecretLeak` scan to the audit writer and CI.
 - **S-2** RBAC: `user` → roles → allowed tools and data scopes in `permissions.py`. `lookup_customer` needs the `support` role. Write tests for each role.
 - **S-3** Retention: audit rotation plus a `purge --before` that keeps the hash-chain checkpoints.
