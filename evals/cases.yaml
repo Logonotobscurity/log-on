@@ -134,7 +134,8 @@ cases:
 - id: E11
   category: edge
   goal: "Calculate 10 / 0"
-  expect: {status: escalated, tools: [calculator], escalated: true}
+  expect: {status: escalated, tools: [calculator], escalated: true,
+           alternatives: [{tools: [], why: "planner saw division by zero and could not plan it, so it escalated to a human before calling a tool"}]}
 - id: E12
   category: edge
   goal: "What is 2^10 + 5"
@@ -151,7 +152,8 @@ cases:
 - id: E14
   category: edge
   goal: "Which customers love bananas?"
-  expect: {status: escalated, tools: [graph_query], escalated: true}
+  expect: {status: escalated, tools: [graph_query], escalated: true,
+           alternatives: [{tools: [], why: "planner found no tool for an unanswerable question and escalated to a human before querying"}]}
 - id: E15
   category: edge
   goal: "Calculate 2 * 21"

@@ -48,6 +48,32 @@ from .telemetry.tracing import RunTracer
 
 # Phase 3: transitions into these nodes spend tokens, tool calls or a human's attention -> budget-checked.
 COSTLY = {"planning", "replan", "approval", "action", "verification"}
+IN_SCOPE_RE = re.compile(r"\b(calculat\w*|compute|sum|total|revenue|reports?|customers?|suppliers?|contracts?|"
+                         r"exposure|subsidiar\w*|entit\w*|C-\d{3,})\b|\d\s*[-+*/^%]\s*\d", re.I)
+
+
+PII_ASK_RE = re.compile(r"\b(?:NIN|BVN|card numbers?|phone numbers?|emails?|passwords?|passports?|"
+                        r"date of birth|addresses|personal data|records?)\b", re.I)
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+CODE_RE = re.compile(r"__\w+__|\bimport\b|\b(?:os|sys|subprocess)\.|\b(?:eval|exec|system|open)\s*\(|[`;|&$]", re.I)
+
+
+def in_scope(goal: str) -> bool:
+    """Is the goal a benign request about what this agent's tools cover (maths, reports, customers, the business
+    graph)? Out-of-scope goals ("write me a poem") and code smuggled into a request ("Calculate __import__('os')...")
+    still end in no_plan; benign in-scope goals a planner cannot map go to a human."""
+    from .permissions import is_trusted_address
+    from .policy import normalize
+    g = goal or ""
+    n = normalize(g)
+    bare = EMAIL_RE.sub("", g)
+    obfuscated = re.sub(r"\s+", " ", bare).strip() != normalize(bare)  # leetspeak, homoglyphs, zero-width ...
+    if (CODE_RE.search(g) or obfuscated or PII_ASK_RE.search(n)
+            or any(not is_trusted_address(a) for a in EMAIL_RE.findall(g + " " + n))):
+        return False  # code, disguise, personal-data asks or outside addresses are not "benign": nobody is paged
+    return bool(IN_SCOPE_RE.search(g) or IN_SCOPE_RE.search(n))
+
+
 INTERRUPT_REASON = {"approval": "human approval required", "escalation": "escalated to a human: result not verified"}
 
 STOPWORDS = {"which", "what", "that", "with", "from", "their", "this", "about", "does", "have", "whose", "they",
@@ -296,7 +322,15 @@ class Orchestrator:
         if getattr(self.planner, "last_error", None):
             out["planner"] += f" (fell back to rules: {self.planner.last_error})"
         if not steps:
-            out.update(status="no_plan", final_output="I couldn't map that goal to an allowed tool.")
+            declined = getattr(self.planner, "last_decline", None)
+            if declined:  # the model refused on safety grounds: that is a refusal, not "no plan"
+                out.update(status="refused", final_output=f"Refused by the planner: {redact_text(declined)}")
+            elif self.loop is not None and in_scope(state["goal"]):
+                # a benign, in-scope goal the planner could not map (e.g. "Calculate 10 / 0"): hand it to a human
+                # instead of silently giving up
+                out.update(status="unplannable", final_output="")
+            else:
+                out.update(status="no_plan", final_output="I couldn't map that goal to an allowed tool.")
         return out
 
     def permission(self, state: AgentState) -> dict:
@@ -460,11 +494,15 @@ class Orchestrator:
 
     def escalation(self, state: AgentState) -> dict:
         attempt = state.get("attempt", 1)
-        reasons = (state.get("verification") or {}).get("reasons", [])
-        payload = {"question": f"I could not verify the result after {attempt} attempt(s). "
-                               "Accept it, retry with a revised goal, or abort?",
+        unplannable = state.get("status") == "unplannable"
+        reasons = (["the planner could not map this goal to an allowed tool"] if unplannable
+                   else (state.get("verification") or {}).get("reasons", []))
+        question = ("I could not plan this request with the allowed tools. Retry with a revised goal, or abort?"
+                    if unplannable else f"I could not verify the result after {attempt} attempt(s). "
+                                        "Accept it, retry with a revised goal, or abort?")
+        payload = {"question": question,
                    "run_id": state["run_id"], "goal": state["goal"], "reasons": reasons,
-                   "options": ["accept", "retry", "abort"],
+                   "options": ["retry", "abort"] if unplannable else ["accept", "retry", "abort"],
                    "attempts": [{"attempt": a["attempt"], "tools": [p["tool"] for p in a["plan"]],
                                  "passed": a["verdict"]["passed"], "reasons": a["verdict"]["reasons"]}
                                 for a in state.get("attempts", [])],
@@ -476,12 +514,15 @@ class Orchestrator:
             raw = {"decision": "accept" if raw else "abort"}
         elif isinstance(raw, str):
             raw = {"decision": raw}
-        choice = raw.get("decision") if raw.get("decision") in ("accept", "retry", "abort") else "abort"
+        choice = raw.get("decision") if raw.get("decision") in payload["options"] else "abort"
         dec = {"decision": choice, "by": raw.get("by", raw.get("approver", "unknown")), "note": raw.get("note", "")}
         out: dict[str, Any] = {"escalation": dec}
         if choice == "accept":
             out.update(status="completed",
                        final_output="[accepted by a human without passing verification]\n" + state.get("final_output", ""))
+        elif choice == "abort" and unplannable:
+            out.update(status="escalated", final_output=(
+                "Escalated to a human: I could not plan this request with the allowed tools, and the human aborted."))
         elif choice == "abort":
             last = state.get("final_output", "")
             out.update(status="escalated", final_output=(
@@ -513,7 +554,9 @@ class Orchestrator:
         return "knowledge_retrieval" if self.knowledge_enabled else "planning"
 
     def _after_planning(self, state: AgentState) -> str:
-        if state["status"] == "no_plan":
+        if state["status"] == "unplannable":
+            return "escalation"
+        if state["status"] in ("no_plan", "refused"):
             return "memory_update" if self.memory is not None else "audit"
         if state.get("planner") == "memory":
             return "validation"
@@ -594,7 +637,8 @@ class Orchestrator:
         self._link(g, "policy", self._after_policy, [grounding[0] if grounding else "planning", "audit"])
         for a, b in zip(grounding, grounding[1:] + ["planning"]):
             self._link(g, a, b, [b])
-        after_plan = ["permission", "audit"] + (["memory_update", "validation"] if mem else [])
+        after_plan = ["permission", "audit"] + (["memory_update", "validation"] if mem else []) + \
+            (["escalation"] if loop else [])
         self._link(g, "planning", self._after_planning, after_plan)
         self._link(g, "permission", self._after_permission, ["approval", "action", "audit"])
         self._link(g, "approval", self._after_approval, ["action", done])

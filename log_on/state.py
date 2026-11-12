@@ -14,7 +14,7 @@ class AgentState(TypedDict, total=False):
     run_id: str
     user: str
     goal: str
-    status: str  # running | refused | no_plan | awaiting_approval | denied | completed | blocked | error
+    status: str  # running | refused | no_plan | unplannable | awaiting_approval | denied | completed | blocked | error
     #             Phase 3: unverified (loop deciding) | escalated (human aborted) | budget_exceeded
     #             step 3: quota_exceeded (per-user daily budget)
     policy: dict[str, Any]

@@ -140,7 +140,8 @@ class FakeServer:
                     msgs = req.get("messages", [])
                     system = next((m["content"] for m in msgs if m.get("role") == "system"), "")
                     user = next((m["content"] for m in reversed(msgs) if m.get("role") == "user"), "")
-                    content = "sorry, I can't do JSON" if srv.mode == "garbage" else respond(system, user, srv.mode)
+                    content = ("sorry, I can't do JSON" if srv.mode == "garbage" else "" if srv.mode == "empty"
+                               else respond(system, user, srv.mode))
                     if srv.mode == "truncated":
                         return self._send(200, {
                             "id": f"fake-{srv.requests}", "object": "chat.completion", "model": srv.model,
@@ -192,7 +193,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m log_on.serving.fake_server")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8099)
-    ap.add_argument("--mode", default="normal", choices=["normal", "error", "garbage", "malicious", "slow", "truncated"])
+    ap.add_argument("--mode", default="normal", choices=["normal", "error", "garbage", "empty", "malicious", "slow", "truncated"])
     ap.add_argument("--delay-ms", type=float, default=0)
     a = ap.parse_args(argv)
     srv = FakeServer(a.host, a.port, a.mode, a.delay_ms)
