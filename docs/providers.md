@@ -10,6 +10,14 @@ self-hosted presets (`vllm`, `llamacpp`, `ollama`, `fake`) and `openai` / `xai`,
 | `openrouter` | `https://openrouter.ai/api/v1` | `qwen/qwen-2.5-72b-instruct` | `OPENROUTER_API_KEY` | – | `provider.require_parameters: true` |
 | `openrouter-free` | same | `google/gemma-4-31b-it:free` | `OPENROUTER_API_KEY` | 20 RPM | `provider.require_parameters: true` |
 
+**Default planner.** With `LOG_ON_LLM_PROVIDER` unset the planner uses the `groq` preset (`openai/gpt-oss-120b`)
+when `GROQ_API_KEY` is set, and the rule planner when it is not (`get_planner()` in `log_on/planner.py`).
+`LOG_ON_LLM_PROVIDER=none` forces rules. Any model error (timeout, 429 after retries, 403, 5xx, malformed or empty
+JSON, a plan with an unknown tool) falls back to the rule planner for that call and is recorded in `last_error`.
+The verifier and KG extractor do not default to Groq (free-tier quota is kept for planning); name a provider to use
+one there. The model may answer `{"steps":[],"decline":true,"reason":...}` for unsafe goals (the run is refused);
+an empty plan for a benign in-scope goal goes to the human escalation step instead of ending in `no_plan`.
+
 Override the model with `LOG_ON_LLM_MODEL` (or `--model` / `preset=model` in the comparison), the pacing with
 `LOG_ON_LLM_RPM` (`0` turns it off, e.g. on a paid tier).
 

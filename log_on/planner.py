@@ -174,14 +174,20 @@ class LLMPlanner:
             return self.fallback.plan(goal, context)
 
 
-def get_planner() -> Planner:
-    """LOG_ON_PLANNER=dspy uses the human-approved DSPy program (prompts/registry.json); otherwise the LLM planner
-    when a provider is configured (log_on.serving), else rules. Every LLM path falls back to rules on error."""
+DEFAULT_PLANNER_PROVIDER = "groq"  # openai/gpt-oss-120b on Groq (docs/provider_comparison.md)
+
+
+def get_planner(env: dict | None = None) -> Planner:
+    """The default planner is Groq openai/gpt-oss-120b (LOG_ON_LLM_PROVIDER unset -> "groq"). Without GROQ_API_KEY,
+    or with LOG_ON_LLM_PROVIDER=none, it is the deterministic rule planner, so CI without the key stays deterministic.
+    LOG_ON_PLANNER=dspy uses the human-approved DSPy program (prompts/registry.json). Every LLM path falls back to
+    rules on any model error (timeout, 429, 403, bad JSON, empty reply)."""
     from .serving import get_provider
-    prov = get_provider()
+    e = os.environ if env is None else env
+    prov = get_provider(e, default=DEFAULT_PLANNER_PROVIDER)
     if prov is None:
         return RuleBasedPlanner()
-    if os.getenv("LOG_ON_PLANNER", "").lower() == "dspy":
+    if e.get("LOG_ON_PLANNER", "").lower() == "dspy":
         from .learning.planner import DSPyPlanner
         return DSPyPlanner.from_registry(provider=prov)
     return LLMPlanner(provider=prov)

@@ -208,3 +208,38 @@ def test_missing_key_means_rule_planner(monkeypatch):
     monkeypatch.setenv("LOG_ON_LLM_PROVIDER", "groq")
     assert isinstance(get_planner(), RuleBasedPlanner)
 
+
+# ------------------------------------------------------------------------------ 4. Groq is the default planner
+def test_default_planner_is_groq_gpt_oss_when_the_key_is_set():
+    from log_on.planner import LLMPlanner, get_planner
+    p = get_planner({"GROQ_API_KEY": FAKE_GROQ})
+    assert isinstance(p, LLMPlanner)
+    assert p.provider.name == "groq" and p.provider.model == "openai/gpt-oss-120b"
+    assert isinstance(p.fallback, __import__("log_on.planner", fromlist=["RuleBasedPlanner"]).RuleBasedPlanner)
+
+
+@pytest.mark.parametrize("env", [{}, {"OPENROUTER_API_KEY": "sk-or-FAKE"},
+                                 {"GROQ_API_KEY": FAKE_GROQ, "LOG_ON_LLM_PROVIDER": "none"},
+                                 {"GROQ_API_KEY": FAKE_GROQ, "LOG_ON_LLM_PROVIDER": "rules"}])
+def test_rule_planner_without_groq_key_or_when_forced(env):
+    from log_on.planner import RuleBasedPlanner, get_planner
+    assert isinstance(get_planner(env), RuleBasedPlanner)
+
+
+def test_explicit_provider_still_wins_over_the_default():
+    from log_on.planner import get_planner
+    p = get_planner({"LOG_ON_LLM_PROVIDER": "openrouter-free", "OPENROUTER_API_KEY": "sk-or-FAKE",
+                     "GROQ_API_KEY": FAKE_GROQ})
+    assert p.provider.name.startswith("openrouter")
+
+
+def test_other_components_do_not_default_to_groq():
+    """Only the planner defaults to Groq; verifier / KG extractor stay rule-based unless a provider is named
+    (keeps free-tier quota for planning)."""
+    from log_on.serving import get_provider
+    assert get_provider({"GROQ_API_KEY": FAKE_GROQ}) is None
+    assert get_provider({"GROQ_API_KEY": FAKE_GROQ}, default="groq").name == "groq"
+
+
+def test_tests_run_without_hosted_keys():
+    assert not os.environ.get("GROQ_API_KEY") and not os.environ.get("OPENROUTER_API_KEY")

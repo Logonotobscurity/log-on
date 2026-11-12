@@ -20,8 +20,8 @@ x-app: &app
     LOG_ON_CHECKPOINTER: postgres
     LOG_ON_POSTGRES_DSN: postgresql://${POSTGRES_USER:-logon}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-logon}
     LOG_ON_TRACE_EXPORTERS: ${LOG_ON_TRACE_EXPORTERS:-jsonl}
-    LOG_ON_LLM_PROVIDER: ${LOG_ON_LLM_PROVIDER:-none}
-    LOG_ON_LLM_BASE_URL: ${LOG_ON_LLM_BASE_URL:-http://llamacpp:8080/v1}
+    LOG_ON_LLM_PROVIDER: ${LOG_ON_LLM_PROVIDER:-}   # empty = Groq planner if GROQ_API_KEY is set, else rules
+    LOG_ON_LLM_BASE_URL: ${LOG_ON_LLM_BASE_URL:-}   # llm profile: http://llamacpp:8080/v1
   volumes:
     - runs:/app/runs
     - cache:/home/app/.cache

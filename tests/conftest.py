@@ -4,6 +4,14 @@ from log_on.graph import Orchestrator
 from log_on.planner import RuleBasedPlanner
 
 
+@pytest.fixture(autouse=True)
+def _no_hosted_keys(monkeypatch):
+    """The default planner is Groq when GROQ_API_KEY is set. Tests must be deterministic and offline whatever the
+    developer's shell holds, so hosted keys are removed; tests that need a provider pass a fake key explicitly."""
+    for k in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "LOG_ON_LLM_PROVIDER", "LOG_ON_LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture
 def orch(tmp_path):
     return Orchestrator(planner=RuleBasedPlanner(), audit_path=tmp_path / "audit.jsonl",

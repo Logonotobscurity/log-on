@@ -9,7 +9,8 @@ OpenAI-compatible `Provider` (`log_on/serving/providers.py`). Switching backends
 | llama.cpp (CPU, used here) | `scripts/serve_llamacpp.sh 1.5b 8082` | `LOG_ON_LLM_PROVIDER=llamacpp LOG_ON_LLM_BASE_URL=http://127.0.0.1:8082/v1 LOG_ON_LLM_MODEL=qwen2.5-1.5b-instruct` |
 | Ollama (CPU/GPU) | `ollama serve` + `ollama pull qwen2.5:1.5b` | `LOG_ON_LLM_PROVIDER=ollama LOG_ON_LLM_MODEL=qwen2.5:1.5b` |
 | Hosted | — | `LOG_ON_LLM_PROVIDER=openai` (or `xai`) + `LOG_ON_LLM_API_KEY` |
-| None | — | `LOG_ON_LLM_PROVIDER=none` → rule-based planner/verifier (the default with no key) |
+| Default | — | `LOG_ON_LLM_PROVIDER` unset: planner on Groq `openai/gpt-oss-120b` if `GROQ_API_KEY` is set, else rules |
+| None | — | `LOG_ON_LLM_PROVIDER=none` → rule-based planner/verifier everywhere |
 
 If the server is down or returns something that isn't a valid plan, the planner falls back to the
 rule-based planner, so the safety layers never depend on the model being up.

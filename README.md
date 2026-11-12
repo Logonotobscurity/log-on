@@ -12,8 +12,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt      # Python
 .venv/bin/python -m log_on.demo --phase4           # serving, DSPy approval gate, red team (offline)
 ```
 
-Everything runs offline with rule-based components. To put a real model in the loop, start a local one
-(`scripts/serve_llamacpp.sh 1.5b 8082`) or set a hosted key, then `export LOG_ON_LLM_PROVIDER=llamacpp` (see Phase 4).
+**Default planner: Groq `openai/gpt-oss-120b`** when `GROQ_API_KEY` is set (`LOG_ON_LLM_PROVIDER` unset = `groq`).
+Without the key, with `LOG_ON_LLM_PROVIDER=none`, or on any model error (timeout, 429 after retries, 403, malformed or
+empty reply) the deterministic rule planner is used, so everything still runs offline and CI stays deterministic.
+Only the planner defaults to Groq; the verifier and KG extractor use a model only when `LOG_ON_LLM_PROVIDER` is named.
+A local model works too: `scripts/serve_llamacpp.sh 1.5b 8082`, then `export LOG_ON_LLM_PROVIDER=llamacpp` (Phase 4).
 
 ## Architecture
 
@@ -60,7 +63,7 @@ refused / no plan / denied ─────────────────�
 |---|---|---|
 | Orchestration | LangGraph `StateGraph`, conditional edges, `InMemorySaver` / `SqliteSaver` checkpointer | `log_on/graph.py` |
 | Intake / policy | Rule-based input policy (prompt injection, bulk PII export, credential requests, harm, fraud) | `log_on/policy.py` |
-| Planning | Pluggable `Planner` protocol: deterministic `RuleBasedPlanner` (default) or `LLMPlanner` (OpenAI-compatible, only if a key is set; schema-checked, falls back to rules) | `log_on/planner.py` |
+| Planning | Pluggable `Planner` protocol: `LLMPlanner` on Groq `openai/gpt-oss-120b` by default when `GROQ_API_KEY` is set (schema-checked, falls back to rules on any error), else the deterministic `RuleBasedPlanner`. A model may decline an unsafe goal (refused); a benign in-scope goal it cannot plan is escalated to a human instead of ending in `no_plan` | `log_on/planner.py` |
 | Permission | Client-side tool risk tiers (low / medium / high); MCP annotations cross-checked but never trusted | `log_on/permissions.py` |
 | Approval | `langgraph.types.interrupt()` + checkpointer; resume with `Command(resume={...})`, even from another process (CLI) | `graph.py::approval`, `__main__.py` |
 | Action | Real MCP server (official `mcp` SDK v2, `MCPServer`, stdio) with `lookup_customer`, `get_report`, `send_report`, `calculator`; client discovers tools, resolves `{{steps[N].output}}`, scrubs PII from data leaving via open-world tools | `log_on/mcp_server/business_server.py`, `log_on/mcp_client.py` |
@@ -178,7 +181,10 @@ forbidden or unapproved tool runs, and the outcome is acceptable (attacks: refus
 other cases: the expected result or an explicit `expect.alternatives` entry). Thresholds are the same. Mutation tests
 in `tests/test_outcome_grader.py` show unsafe trajectories still fail. Latest results (`docs/provider_comparison.md`):
 Groq `openai/gpt-oss-120b` **passes** the full gate (0.995, 0 leaks, attack pass 1.0); `qwen/qwen3.8-27b` passes
-(0.993); local Qwen2.5-1.5B does not (0.988, one approval-bait finding). The default planner is unchanged.
+(0.993); local Qwen2.5-1.5B does not (0.988, one approval-bait finding). With Rhonda's approval Groq
+`openai/gpt-oss-120b` is now the default planner (rules without the key), after three fixes: sends outside
+`LOG_ON_TRUSTED_DOMAINS` are refused outright (no human is asked), benign unplannable goals escalate, and every model
+error falls back to rules.
 
 ## Approval web UI
 
@@ -345,11 +351,11 @@ Environment variables:
 
 | Var | Effect |
 |---|---|
-| `LOG_ON_LLM_PROVIDER` | Phase 4: `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `groq`, `groq-qwen`, `openrouter`, `openrouter-free`, `fake`, or `none` (force rules) |
+| `LOG_ON_LLM_PROVIDER` | unset = planner on `groq` if `GROQ_API_KEY` is set, else rules; or `vllm`, `llamacpp`, `ollama`, `openai`, `xai`, `groq`, `groq-qwen`, `openrouter`, `openrouter-free`, `fake`, or `none` (force rules) |
 | `GROQ_API_KEY`, `OPENROUTER_API_KEY` | keys for the hosted presets; each is only sent to its own provider (`docs/providers.md`) |
 | `LOG_ON_LLM_RPM` | client-side requests/minute cap per model (defaults: Groq 30, OpenRouter free 20; `0` = off) |
 | `LOG_ON_PLANNER` | `dspy` to use the human-approved DSPy planner program from `prompts/registry.json` |
-| `LOG_ON_TRUSTED_DOMAINS` | comma list of domains customer records may be emailed to (default `acme.example`) |
+| `LOG_ON_TRUSTED_DOMAINS` | comma list of domains anything may be sent to (default `acme.example`); sends elsewhere are refused before approval |
 | `LOG_ON_LLM_API_KEY` (or `OPENAI_API_KEY`) | switch planning to `LLMPlanner` (hosted `openai` preset if no provider is set) |
 | `LOG_ON_LLM_BASE_URL`, `LOG_ON_LLM_MODEL` | any OpenAI-compatible endpoint (OpenAI, Together, a local vLLM/Ollama server) |
 | `LOG_ON_GUARD_BACKEND` | `native` (default), `guardrails`, or `auto` |

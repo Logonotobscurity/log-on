@@ -404,17 +404,21 @@ def make_provider(name: str = "openai", *, base_url: str | None = None, model: s
                                    model=model or preset["model"], api_key=key or "local", **kw))
 
 
-def get_provider(env: dict | None = None) -> Provider | None:
-    """Provider from the environment, or None (= rule-based everywhere)."""
+def get_provider(env: dict | None = None, default: str | None = None) -> Provider | None:
+    """Provider from the environment, or None (= rule-based). `default`: the preset to use when LOG_ON_LLM_PROVIDER
+    is unset (the planner passes "groq"); a hosted default without its key still gives None, so no key = rules."""
     e = os.environ if env is None else env
     name = (e.get("LOG_ON_LLM_PROVIDER") or "").strip().lower()
     key = e.get("LOG_ON_LLM_API_KEY") or e.get("OPENAI_API_KEY")  # back-compat: no provider named -> openai
     if name in ("none", "off", "rules"):
         return None
     if not name:
-        if not key:
+        if key:
+            name = "openai"
+        elif default:
+            name = default
+        else:
             return None
-        name = "openai"
     preset = PRESETS.get(name)
     if preset is None and not e.get("LOG_ON_LLM_BASE_URL"):
         raise ValueError(f"unknown LOG_ON_LLM_PROVIDER={name!r}; choose one of {sorted(PRESETS)} or set LOG_ON_LLM_BASE_URL")
