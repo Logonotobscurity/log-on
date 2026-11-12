@@ -314,6 +314,12 @@ class Orchestrator:
             out.update(status="refused", final_output=(
                 f"Refused: the plan would send data to {where}, which you did not give in this request. "
                 "I only send to addresses you type yourself."))
+        elif decision.get("untrusted_destinations"):
+            doms = sorted({v["domain"] for v in decision["untrusted_destinations"]})
+            out.update(status="refused", final_output=(
+                f"Refused: the plan would send to {', '.join(doms)}, which is outside the trusted domains "
+                "(LOG_ON_TRUSTED_DOMAINS). Sending outside the organisation is not allowed, so nothing was run and "
+                "no approval was requested."))
         elif decision["dataflow_violations"]:
             v = decision["dataflow_violations"][0]
             out.update(status="refused", final_output=(

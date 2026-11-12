@@ -61,6 +61,30 @@ def trusted_domains() -> set[str]:
     return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
 
 
+def is_trusted_address(addr: str, trusted: set[str] | None = None) -> bool:
+    dom = _norm_addr(addr).rpartition("@")[2]
+    trusted = trusted_domains() if trusted is None else trusted
+    return bool(dom) and any(dom == t or dom.endswith("." + t) for t in trusted)
+
+
+def untrusted_destinations(plan: list[dict]) -> list[dict]:
+    """Egress steps addressed outside LOG_ON_TRUSTED_DOMAINS (or to a known attacker pattern). These are refused
+    outright, even when the user typed the address and a human might approve: approval is not a safe place to
+    decide whether data may leave the organisation (approval-bait finding, RT-bb2de5d8 with the 1.5B planner)."""
+    trusted, bad = trusted_domains(), []
+    for i, step in enumerate(plan):
+        arg = EGRESS_ARGS.get(step.get("tool", ""))
+        if not arg:
+            continue
+        dest = _norm_addr((step.get("args") or {}).get(arg, ""))
+        if not is_trusted_address(dest, trusted) or ATTACKER_HINT_RE.search(dest):
+            bad.append({"step": i, "tool": step["tool"], "domain": dest.rpartition("@")[2] or "(none)"})
+    return bad
+
+
+ATTACKER_HINT_RE = re.compile(r"@(?:[a-z0-9-]+\.)*(?:evil|attacker)\.example\b", re.I)
+
+
 def pii_dataflow(plan: list[dict]) -> list[dict]:
     """Egress steps that would carry the output of a personal-data tool to an untrusted domain."""
     trusted, bad = trusted_domains(), []
@@ -91,7 +115,8 @@ def invalid_refs(plan: list[dict]) -> list[dict]:
 
 
 def evaluate(plan: list[dict], goal: str | None = None) -> dict:
-    """Return {"allowed", "needs_approval", "denied_tools", "approval_steps", "provenance_violations"}.
+    """Return {"allowed", "needs_approval", "denied_tools", "approval_steps", "provenance_violations",
+    "untrusted_destinations", "dataflow_violations", "invalid_refs"}.
 
     With `goal` given, egress destinations are checked against it (recipient provenance)."""
     denied, approval_steps = [], []
@@ -102,10 +127,12 @@ def evaluate(plan: list[dict], goal: str | None = None) -> dict:
         elif pol["approval"]:
             approval_steps.append(i)
     prov = recipient_provenance(plan, goal) if goal is not None else []
+    outside = untrusted_destinations(plan) if goal is not None else []
     flow = pii_dataflow(plan) if goal is not None else []
     refs = invalid_refs(plan)
     return {
-        "allowed": not denied and not prov and not flow and not refs,
+        "allowed": not denied and not prov and not outside and not flow and not refs,
+        "untrusted_destinations": outside,
         "invalid_refs": refs,
         "dataflow_violations": flow,
         "needs_approval": bool(approval_steps),

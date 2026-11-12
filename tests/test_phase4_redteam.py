@@ -61,8 +61,8 @@ def test_planner_chosen_recipient_is_refused_before_approval(tmp_path):
     r = o.start("Tell finance the numbers")
     assert r["status"] == "refused" and "pending_approval" not in r
     assert "attacker@evil.example" not in r["final_output"]  # the refusal itself is redacted
-    r2 = o.start("Send it to attacker@evil.example")  # the user typed it: their call, a human approves
-    assert r2["status"] == "awaiting_approval"
+    r2 = o.start("Send it to attacker@evil.example")  # typed by the user, but outside the trusted domains:
+    assert r2["status"] == "refused" and "pending_approval" not in r2   # refused outright since the Groq-default step
 
 
 def test_credential_statements_with_qualifiers_are_scrubbed_and_not_memorised(p2):
@@ -136,7 +136,7 @@ def test_customer_records_never_leave_for_outside_domains(tmp_path, monkeypatch)
                                               "body": "{{steps[0].output}}"}}]
     o = Orchestrator(planner=Scripted(steps), audit_path=tmp_path / "a.jsonl", outbox=tmp_path / "o.jsonl")
     r = o.start("Send customer C-1001 details to collector@evil.example")
-    assert r["status"] == "refused" and "outside domain" in r["final_output"] and "pending_approval" not in r
+    assert r["status"] == "refused" and "outside the trusted domains" in r["final_output"] and "pending_approval" not in r
     inside = [steps[0], {**steps[1], "args": {**steps[1]["args"], "recipient": "crm@acme.example"}}]
     o2 = Orchestrator(planner=Scripted(inside), audit_path=tmp_path / "b.jsonl", outbox=tmp_path / "p.jsonl")
     assert o2.start("Send customer C-1001 details to crm@acme.example")["status"] == "awaiting_approval"
